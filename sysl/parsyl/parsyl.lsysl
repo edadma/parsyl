@@ -8,7 +8,7 @@ sysl `dev`.
     import std.option.{Option, Some, None}
     import std.bytes.{as_bytes, has_prefix}
     import std.utf8.{decode_rune}
-    import std.builder.{StrBuilder, new_builder}
+    import std.builder.{new_builder}
 
 
 Input
@@ -123,6 +123,38 @@ opt
             p(inp) match
                 Success(v, n) -> Success(Some(v), n)
                 Failure(_, _) -> Success(None, inp))
+
+
+not_p, and_p — PEG-style lookahead
+----------------------------------
+
+`not_p(p)` is the negative-lookahead predicate: succeeds with `()` if
+`p` would *fail* at the current position, fails if `p` would succeed.
+Either way the cursor doesn't advance — the predicate just *guards*
+what comes next.
+
+`and_p(p)` is the positive-lookahead predicate: succeeds with `p`'s
+value if `p` would succeed at the current position, fails otherwise.
+Again, the cursor doesn't advance.
+
+Together they express PEG-style guards naturally:
+`and_p(letter) ~> rep1(alphanum)` to require the run starts with a
+letter, or `not_p(reserved_word) ~> ident` to reject reserved words.
+
+Once prefix-operator overloading lands these will get `!p` and `&p`
+sugar via dedicated traits — the underlying functions are stable.
+
+    not_p[A](p: Parser[A]) -> Parser[unit] =
+        Parser[unit]((inp: Input) ->
+            p(inp) match
+                Success(_, _) -> Failure("not-predicate matched", inp)
+                Failure(_, _) -> Success((), inp))
+
+    and_p[A](p: Parser[A]) -> Parser[A] =
+        Parser[A]((inp: Input) ->
+            p(inp) match
+                Success(v, _) -> Success(v, inp)
+                Failure(m, n) -> Failure(m, n))
 
 
 rep
@@ -669,6 +701,65 @@ Tests
                 o match
                     Some(_) -> panic("opt of failure should be None")
                     None    -> ()
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_not_p_match_fails() -> unit
+        // At position 0 of "abc", `literal("abc")` would succeed,
+        // so `not_p(literal("abc"))` must fail.
+        val p = not_p(literal("abc"))
+        p(Input(as_bytes("abc"), 0)) match
+            Success(_, _) -> panic("not_p should fail when inner succeeds")
+            Failure(_, n) -> expect(n.offset, 0, "no advance on failure")
+
+    #test
+    test_not_p_no_match_succeeds() -> unit
+        // At position 0 of "xyz", `literal("abc")` fails, so not_p succeeds.
+        val p = not_p(literal("abc"))
+        p(Input(as_bytes("xyz"), 0)) match
+            Success(_, n) -> expect(n.offset, 0, "no advance on success")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_not_p_guards_alternative() -> unit
+        // Composed: only accept "ab" if NOT followed by "c".
+        // At "abd" should match "ab"; at "abc" should fail.
+        val guarded = literal("ab") <~ not_p(literal("c"))
+        guarded(Input(as_bytes("abd"), 0)) match
+            Success(v, n) ->
+                expect(n.offset, 2, "consumed 'ab'")
+                if v != "ab" then panic("expected 'ab'")
+            Failure(m, _) -> panic(s"unexpected failure on 'abd': ${m}")
+        guarded(Input(as_bytes("abc"), 0)) match
+            Success(_, _) -> panic("should reject 'ab' followed by 'c'")
+            Failure(_, _) -> ()
+
+    #test
+    test_and_p_match_succeeds() -> unit
+        // and_p succeeds with the inner value but does NOT advance.
+        val p = and_p(literal("hi"))
+        p(Input(as_bytes("hi!"), 0)) match
+            Success(v, n) ->
+                if v != "hi" then panic("expected 'hi'")
+                expect(n.offset, 0, "and_p does not advance")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_and_p_no_match_fails() -> unit
+        val p = and_p(literal("hi"))
+        p(Input(as_bytes("xyz"), 0)) match
+            Success(_, _) -> panic("and_p should fail when inner fails")
+            Failure(_, _) -> ()
+
+    #test
+    test_and_p_then_consume() -> unit
+        // Classic compose: peek that input starts with "ab", then consume.
+        // and_p doesn't advance, so the literal still sees "ab" at offset 0.
+        val p = and_p(literal("ab")) ~> literal("abc")
+        p(Input(as_bytes("abc"), 0)) match
+            Success(v, n) ->
+                if v != "abc" then panic("expected 'abc'")
+                expect(n.offset, 3, "consumed 'abc' after and_p")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
