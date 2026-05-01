@@ -8,6 +8,7 @@ sysl `dev`.
     import std.option.{Option, Some, None}
     import std.bytes.{as_bytes, has_prefix}
     import std.utf8.{decode_rune}
+    import std.builder.{StrBuilder, new_builder}
 
 
 Input
@@ -479,22 +480,17 @@ operators (`~>`, `<~`, `|`, `^^`, `^^^`) or `chainl1`.
         lex(rep1(digit) ^^ ((cs: []char) -> digits_to_int(cs)))
 
 An identifier is a letter followed by zero-or-more alphanumeric chars,
-returned as a `[]char`. `name_is(cs, "max")` compares it against an
-ASCII string for cheap equality checks in evaluators.
+encoded as a `string` via `StrBuilder`. Storing the name as a string
+lets evaluators compare it with `name == "max"` instead of going
+through a per-char helper.
 
-    ident -> Parser[[]char] =
+    ident -> Parser[string] =
         lex(letter ~ rep(alphanum) ^^ ((p: (char, []char)) ->
-            var result: []char = [p._0]
+            val b = new_builder()
+            b.write_rune(p._0)
             for i in 0..<len(p._1) do
-                result = append(result, p._1[i])
-            result))
-
-    name_is(cs: []char, s: string) -> bool =
-        val sb = as_bytes(s)
-        if len(cs) != len(sb) then return false
-        for i in 0..<len(cs) do
-            if int(cs[i]) != int(sb[i]) then return false
-        true
+                b.write_rune(p._1[i])
+            b.to_str()))
 
 The op parsers each consume their token (with surrounding whitespace via
 `lex`) and return a binary `(int, int) -> int` combiner — exactly the
@@ -531,7 +527,7 @@ passes consume it (typecheck, optimize, evaluate, codegen).
         Mul(left: Expr, right: Expr)
         Div(left: Expr, right: Expr)
         Neg(operand: Expr)
-        App(name: []char, args: []Expr)
+        App(name: string, args: []Expr)
 
     eval(e: Expr) -> int =
         e match
@@ -548,18 +544,18 @@ look the name up in an environment; here we hard-code a tiny set of
 builtins (`max`, `min`, `abs`) so the App tests can check eval output
 as well as tree shape.
 
-    eval_app(name: []char, args: []Expr) -> int =
-        if name_is(name, "max") then
+    eval_app(name: string, args: []Expr) -> int =
+        if name == "max" then
             if len(args) != 2 then panic("max needs 2 args")
             val a = eval(args[0])
             val b = eval(args[1])
             return if a > b then a else b
-        if name_is(name, "min") then
+        if name == "min" then
             if len(args) != 2 then panic("min needs 2 args")
             val a = eval(args[0])
             val b = eval(args[1])
             return if a < b then a else b
-        if name_is(name, "abs") then
+        if name == "abs" then
             if len(args) != 1 then panic("abs needs 1 arg")
             val a = eval(args[0])
             return if a < 0 then -a else a
@@ -586,7 +582,7 @@ list of expressions (zero or more — `f()` is valid). `repsep` produces
 the `[]Expr` directly.
 
     eapp -> Parser[Expr] =
-        val build = (p: ([]char, []Expr)) -> App(p._0, p._1)
+        val build = (p: (string, []Expr)) -> App(p._0, p._1)
         (ident ~ ("(" ~> repsep(eexpr, lex(literal(","))) <~ ")")) ^^ build
 
     efactor -> Parser[Expr] =
@@ -1072,7 +1068,7 @@ and validate both shape and eval-time behaviour.
             Success(t, _) ->
                 t match
                     App(name, args) ->
-                        if !name_is(name, "f") then panic("expected name 'f'")
+                        if name != "f" then panic("expected name 'f'")
                         expect(len(args), 0, "expected zero args")
                     _ -> panic("expected App")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
@@ -1083,7 +1079,7 @@ and validate both shape and eval-time behaviour.
             Success(t, _) ->
                 t match
                     App(name, args) ->
-                        if !name_is(name, "g") then panic("expected name 'g'")
+                        if name != "g" then panic("expected name 'g'")
                         expect(len(args), 1, "expected one arg")
                         args[0] match
                             Num(v) -> expect(v, 5, "arg is Num(5)")
@@ -1097,7 +1093,7 @@ and validate both shape and eval-time behaviour.
             Success(t, _) ->
                 t match
                     App(name, args) ->
-                        if !name_is(name, "h") then panic("expected name 'h'")
+                        if name != "h" then panic("expected name 'h'")
                         expect(len(args), 3, "expected three args")
                         expect(eval(args[0]), 1, "arg0 evals to 1")
                         expect(eval(args[1]), 2, "arg1 evals to 2")
@@ -1112,11 +1108,11 @@ and validate both shape and eval-time behaviour.
             Success(t, _) ->
                 t match
                     App(outer_name, outer_args) ->
-                        if !name_is(outer_name, "outer") then panic("outer name wrong")
+                        if outer_name != "outer" then panic("outer name wrong")
                         expect(len(outer_args), 2, "outer has 2 args")
                         outer_args[0] match
                             App(inner_name, inner_args) ->
-                                if !name_is(inner_name, "inner") then panic("inner name")
+                                if inner_name != "inner" then panic("inner name")
                                 expect(len(inner_args), 1, "inner has 1 arg")
                                 expect(eval(inner_args[0]), 1, "inner arg = 1")
                             _ -> panic("expected nested App")
@@ -1132,7 +1128,7 @@ and validate both shape and eval-time behaviour.
                 t match
                     Add(Num(a), App(name, args)) ->
                         expect(a, 1, "left = 1")
-                        if !name_is(name, "max") then panic("expected 'max'")
+                        if name != "max" then panic("expected 'max'")
                         expect(len(args), 2, "max takes 2 args")
                     _ -> panic("expected Add(Num, App)")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
