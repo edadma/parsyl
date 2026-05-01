@@ -6,18 +6,26 @@ Sysl port of the Scala reference at
 sysl `dev`.
 
     import std.option.{Option, Some, None}
-    import std.strings.{has_prefix}
+    import std.bytes.{as_bytes, has_prefix}
+    import std.utf8.{decode_rune}
 
 
 Input
 -----
 
     struct Input
-        source: string
+        source: []byte
         offset: int
 
     Input.at_end() -> bool = self.offset >= len(self.source)
     Input.advance(n: int) -> Input = Input(self.source, self.offset + n)
+
+`mk_input(s)` is the conversational entry point — converts a string to
+the byte-slice-backed `Input` once at the boundary. Past that, all
+parser combinators work in bytes (zero-copy slicing, UTF-8 decoding via
+`std.utf8`).
+
+    mk_input(s: string) -> Input = Input(as_bytes(s), 0)
 
 
 ParseResult
@@ -354,13 +362,13 @@ Read one byte if it satisfies the predicate. `label` is woven into the
 failure message — pass something the user can act on like `"digit"` or
 `"alpha"`.
 
-    accept_if(label: string, pred: (byte) -> bool) -> Parser[byte] =
-        Parser[byte]((inp: Input) ->
+    accept_if(label: string, pred: (char) -> bool) -> Parser[char] =
+        Parser[char]((inp: Input) ->
             if inp.at_end() then
                 Failure(s"expected ${label}, got end of input", inp)
             else
-                val b: byte = inp.source[inp.offset]
-                if pred(b) then Success(b, inp.advance(1))
+                val (c, n) = decode_rune(inp.source[inp.offset : len(inp.source)])
+                if pred(c) then Success(c, inp.advance(n))
                 else Failure(s"expected ${label}", inp))
 
 
@@ -371,10 +379,11 @@ Match a literal string prefix. Uses `std.strings.has_prefix` over the
 unconsumed slice — empty string matches at every position.
 
     literal(s: string) -> Parser[string] =
+        val sb = as_bytes(s)
         Parser[string]((inp: Input) ->
             val rest = inp.source[inp.offset : len(inp.source)]
-            if has_prefix(rest, s) then
-                Success(s, inp.advance(len(s)))
+            if has_prefix(rest, sb) then
+                Success(s, inp.advance(len(sb)))
             else
                 Failure(s"expected literal '${s}'", inp))
 
@@ -415,7 +424,7 @@ Top-level entry: skip leading whitespace, run `p`, then require the
 input to be exhausted (modulo trailing whitespace).
 
     parse_all[A](p: Parser[A], src: string) -> ParseResult[A] =
-        skip_ws(p <~ skip_ws(eoi()))(Input(src, 0))
+        skip_ws(p <~ skip_ws(eoi()))(mk_input(src))
 
 
 Expression-grammar demo
@@ -427,17 +436,17 @@ sub-expressions, and arbitrary whitespace between tokens. The whole
 grammar is six function bodies — every interesting line uses one of the
 operators (`~>`, `<~`, `|`, `^^`, `^^^`) or `chainl1`.
 
-    digit_p() -> Parser[byte] =
-        accept_if("digit", (b: byte) -> b >= 0x30u8 && b <= 0x39u8)
+    digit_p() -> Parser[char] =
+        accept_if("digit", (c: char) -> '0' <= c <= '9')
 
-    digits_to_int(bs: []byte) -> int =
+    digits_to_int(cs: []char) -> int =
         var n = 0
-        for i in 0..<len(bs) do
-            n = n * 10 + int(bs[i] - 0x30u8)
+        for i in 0..<len(cs) do
+            n = n * 10 + int(cs[i] - '0')
         n
 
     number_p() -> Parser[int] =
-        lex(rep1(digit_p()) ^^ ((bs: []byte) -> digits_to_int(bs)))
+        lex(rep1(digit_p()) ^^ ((cs: []char) -> digits_to_int(cs)))
 
 The op parsers each consume their token (with surrounding whitespace via
 `lex`) and return a binary `(int, int) -> int` combiner — exactly the
@@ -464,42 +473,42 @@ Tests
     #test
     test_success() -> unit
         val p = success[int](42)
-        p(Input("hello", 0)) match
+        p(Input(as_bytes("hello"), 0)) match
             Success(v, _) -> expect(v, 42, "success returns its value")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_failure() -> unit
         val p = failure[int]("nope")
-        p(Input("hello", 0)) match
+        p(Input(as_bytes("hello"), 0)) match
             Success(_, _) -> panic("failure should not succeed")
             Failure(_, _) -> ()
 
     #test
     test_end_at_end() -> unit
         val p = eoi()
-        p(Input("ab", 2)) match
+        p(Input(as_bytes("ab"), 2)) match
             Success(_, _) -> ()
             Failure(_, _) -> panic("end should succeed at end of input")
 
     #test
     test_end_not_at_end() -> unit
         val p = eoi()
-        p(Input("ab", 0)) match
+        p(Input(as_bytes("ab"), 0)) match
             Success(_, _) -> panic("end should fail mid-input")
             Failure(_, _) -> ()
 
     #test
     test_map() -> unit
         val p: Parser[int] = map(success[int](21), (x: int) -> x * 2)
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 42, "map doubles")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_seq_success() -> unit
         val p = seq(success[int](1), success[int](2))
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success((a, b), _) ->
                 expect(a, 1, "seq first")
                 expect(b, 2, "seq second")
@@ -508,21 +517,21 @@ Tests
     #test
     test_or_first() -> unit
         val p = or(success[int](1), success[int](2))
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 1, "or takes the first success")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_or_fallback() -> unit
         val p = or(failure[int]("nope"), success[int](2))
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 2, "or falls back to second on first failure")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_opt_some() -> unit
         val p = opt(success[int](7))
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(o, _) ->
                 o match
                     Some(v) -> expect(v, 7, "opt-Some carries value")
@@ -532,7 +541,7 @@ Tests
     #test
     test_opt_none() -> unit
         val p = opt(failure[int]("nope"))
-        p(Input("hi", 2)) match
+        p(Input(as_bytes("hi"), 2)) match
             Success(o, n) ->
                 expect(n.offset, 2, "opt of failure does not advance")
                 o match
@@ -543,7 +552,7 @@ Tests
     #test
     test_rep_zero() -> unit
         val p = rep(failure[int]("nope"))
-        p(Input("xx", 0)) match
+        p(Input(as_bytes("xx"), 0)) match
             Success(xs, n) ->
                 expect(len(xs), 0, "rep of always-failing yields empty slice")
                 expect(n.offset, 0, "rep does not advance on no matches")
@@ -552,7 +561,7 @@ Tests
     #test
     test_rep1_fail_on_zero() -> unit
         val p = rep1(failure[int]("nope"))
-        p(Input("xx", 0)) match
+        p(Input(as_bytes("xx"), 0)) match
             Success(_, _) -> panic("rep1 should fail on zero matches")
             Failure(_, _) -> ()
 
@@ -561,7 +570,7 @@ Tests
         // exercise the append path explicitly — the simple test cases above
         // never trigger it, masking any bug in [first] -> append(result, v).
         val p = rep1(literal("x"))
-        p(Input("xxx", 0)) match
+        p(Input(as_bytes("xxx"), 0)) match
             Success(vs, n) ->
                 expect(len(vs), 3, "rep1 collects three xs")
                 expect(n.offset, 3, "rep1 consumes all xs")
@@ -570,28 +579,28 @@ Tests
     #test
     test_seq_l() -> unit
         val p = seq_l(success[int](1), success[int](2))
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 1, "seq_l keeps left")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_seq_r() -> unit
         val p = seq_r(success[int](1), success[int](2))
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 2, "seq_r keeps right")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_flat_map() -> unit
         val p = flat_map(success[int](21), (x: int) -> success[int](x * 2))
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 42, "flat_map chains")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_op_seq() -> unit
         val p = success[int](1) ~ success[int](2)
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success((a, b), _) ->
                 expect(a, 1, "~ first")
                 expect(b, 2, "~ second")
@@ -600,35 +609,35 @@ Tests
     #test
     test_op_or() -> unit
         val p = failure[int]("nope") | success[int](2)
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 2, "| falls back")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_op_seqr() -> unit
         val p = success[int](1) ~> success[int](2)
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 2, "~> keeps right")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_op_seql() -> unit
         val p = success[int](1) <~ success[int](2)
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 1, "<~ keeps left")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_op_map() -> unit
         val p: Parser[int] = success[int](21) ^^ ((x: int) -> x * 2)
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 42, "^^ maps")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_op_mapto() -> unit
         val p: Parser[int] = success[int](999) ^^^ 7
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 7, "^^^ replaces")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
@@ -640,7 +649,7 @@ Tests
         // operand and op succeed without consuming input.
         val no_op: Parser[(int, int) -> int] = failure[(int, int) -> int]("no op")
         val one_only: Parser[int] = chainl1(success[int](42), no_op)
-        one_only(Input("", 0)) match
+        one_only(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 42, "chainl1 with no ops returns the operand")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
@@ -649,7 +658,7 @@ Tests
         // same shape as test_chainl1: no-iteration path, op fails immediately.
         val no_op: Parser[(int, int) -> int] = failure[(int, int) -> int]("no op")
         val one_only: Parser[int] = chainr1(success[int](42), no_op)
-        one_only(Input("", 0)) match
+        one_only(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 42, "chainr1 with no ops returns the operand")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
@@ -657,14 +666,14 @@ Tests
     test_lazy_p() -> unit
         // thunk evaluates lazily on each call; the underlying parser is just success(7).
         val p: Parser[int] = lazy_p[int](() -> success[int](7))
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 7, "lazy_p delegates to thunked parser")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_literal_match() -> unit
         val p = literal("foo")
-        p(Input("foobar", 0)) match
+        p(Input(as_bytes("foobar"), 0)) match
             Success(v, n) ->
                 expect(n.offset, 3, "literal advances by length")
                 if v != "foo" then panic(s"unexpected value: ${v}")
@@ -673,25 +682,25 @@ Tests
     #test
     test_literal_no_match() -> unit
         val p = literal("foo")
-        p(Input("bar", 0)) match
+        p(Input(as_bytes("bar"), 0)) match
             Success(_, _) -> panic("literal should have failed")
             Failure(_, n) -> expect(n.offset, 0, "literal does not consume on failure")
 
     #test
     test_accept_if_digit() -> unit
-        val digit: Parser[byte] =
-            accept_if("digit", (b: byte) -> b >= 0x30u8 && b <= 0x39u8)
-        digit(Input("7x", 0)) match
+        val digit: Parser[char] =
+            accept_if("digit", (c: char) -> '0' <= c <= '9')
+        digit(Input(as_bytes("7x"), 0)) match
             Success(v, n) ->
                 expect(n.offset, 1, "accept_if advances by one")
-                if v != 0x37u8 then panic(s"unexpected byte")
+                if v != '7' then panic(s"unexpected codepoint")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_accept_if_at_end() -> unit
-        val digit: Parser[byte] =
-            accept_if("digit", (b: byte) -> b >= 0x30u8 && b <= 0x39u8)
-        digit(Input("", 0)) match
+        val digit: Parser[char] =
+            accept_if("digit", (c: char) -> '0' <= c <= '9')
+        digit(Input(as_bytes(""), 0)) match
             Success(_, _) -> panic("should have failed at end of input")
             Failure(_, n) -> expect(n.offset, 0, "accept_if at end does not advance")
 
@@ -701,7 +710,7 @@ Tests
         val item = literal("x")
         val sep = literal(",")
         val p = repsep(item, sep)
-        p(Input("", 0)) match
+        p(Input(as_bytes(""), 0)) match
             Success(vs, n) ->
                 expect(len(vs), 0, "repsep on empty input returns []")
                 expect(n.offset, 0, "no consumption")
@@ -712,7 +721,7 @@ Tests
         val item = literal("x")
         val sep = literal(",")
         val p = rep1sep(item, sep)
-        p(Input("x,x,x", 0)) match
+        p(Input(as_bytes("x,x,x"), 0)) match
             Success(vs, n) ->
                 expect(len(vs), 3, "three items")
                 expect(n.offset, 5, "consumed all five bytes")
@@ -721,7 +730,7 @@ Tests
     #test
     test_skip_ws() -> unit
         val p = skip_ws[string](literal("hi"))
-        p(Input("   hi", 0)) match
+        p(Input(as_bytes("   hi"), 0)) match
             Success(v, n) ->
                 expect(n.offset, 5, "skipped 3 spaces and consumed 'hi'")
                 if v != "hi" then panic(s"unexpected value: ${v}")
@@ -730,7 +739,7 @@ Tests
     #test
     test_lex_trailing_ws() -> unit
         val p = lex[string](literal("hi"))
-        p(Input("hi   ", 0)) match
+        p(Input(as_bytes("hi   "), 0)) match
             Success(_, n) -> expect(n.offset, 5, "lex consumes trailing ws")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
