@@ -1,0 +1,775 @@
+parsyl — combinator parser library
+===================================
+
+Sysl port of the Scala reference at
+`shared/src/main/scala/io/github/edadma/parsyl/Parsers.scala`. Targets
+sysl `dev`.
+
+    import std.option.{Option, Some, None}
+    import std.strings.{has_prefix}
+
+
+Input
+-----
+
+    struct Input
+        source: string
+        offset: int
+
+    Input.at_end() -> bool = self.offset >= len(self.source)
+    Input.advance(n: int) -> Input = Input(self.source, self.offset + n)
+
+
+ParseResult
+-----------
+
+    enum ParseResult[A]
+        Success(value: A, next: Input)
+        Failure(msg: string, at: Input)
+
+
+Parser
+------
+
+    type Parser[A] = new (Input) -> ParseResult[A]
+
+
+Trivial parsers
+---------------
+
+    success[A](v: A) -> Parser[A] =
+        Parser[A]((inp: Input) -> Success(v, inp))
+
+    failure[A](msg: string) -> Parser[A] =
+        Parser[A]((inp: Input) -> Failure(msg, inp))
+
+
+eoi
+---
+
+    eoi() -> Parser[unit] =
+        Parser[unit]((inp: Input) ->
+            if inp.at_end() then Success((), inp)
+            else Failure("expected end of input", inp))
+
+
+map
+---
+
+    map[A, B](p: Parser[A], f: (A) -> B) -> Parser[B] =
+        Parser[B]((inp: Input) ->
+            p(inp) match
+                Success(v, n) -> Success(f(v), n)
+                Failure(m, n) -> Failure(m, n))
+
+
+seq
+---
+
+`seq` runs `p` then `q`, returning the pair. `seq_l` and `seq_r` are the
+"keep left" / "keep right" variants — used heavily for skipping
+delimiters.
+
+    seq[A, B](p: Parser[A], q: Parser[B]) -> Parser[(A, B)] =
+        Parser[(A, B)]((inp: Input) ->
+            p(inp) match
+                Failure(m, n) -> Failure(m, n)
+                Success(va, na) ->
+                    q(na) match
+                        Failure(m, n) -> Failure(m, n)
+                        Success(vb, nb) -> Success((va, vb), nb))
+
+    seq_l[A, B](p: Parser[A], q: Parser[B]) -> Parser[A] =
+        p ~ q ^^ ((t: (A, B)) -> t._0)
+
+    seq_r[A, B](p: Parser[A], q: Parser[B]) -> Parser[B] =
+        p ~ q ^^ ((t: (A, B)) -> t._1)
+
+
+flat_map
+--------
+
+    flat_map[A, B](p: Parser[A], f: (A) -> Parser[B]) -> Parser[B] =
+        Parser[B]((inp: Input) ->
+            p(inp) match
+                Success(v, n) -> f(v)(n)
+                Failure(m, n) -> Failure(m, n))
+
+
+or
+--
+
+    or[A](p: Parser[A], q: Parser[A]) -> Parser[A] =
+        Parser[A]((inp: Input) ->
+            p(inp) match
+                Success(v, n) -> Success(v, n)
+                Failure(_, _) -> q(inp))
+
+
+opt
+---
+
+    opt[A](p: Parser[A]) -> Parser[Option[A]] =
+        Parser[Option[A]]((inp: Input) ->
+            p(inp) match
+                Success(v, n) -> Success(Some(v), n)
+                Failure(_, _) -> Success(None, inp))
+
+
+rep
+---
+
+Zero or more applications of `p`. The no-progress check
+(`n.offset > current.offset`) defends against a parser that succeeds
+without consuming input, which would otherwise loop forever.
+
+    rep[A](p: Parser[A]) -> Parser[[]A] =
+        Parser[[]A]((inp: Input) ->
+            var result: []A = []
+            var current = inp
+            var more = true
+            while more do
+                p(current) match
+                    Success(v, n) ->
+                        if n.offset > current.offset then
+                            result = append(result, v)
+                            current = n
+                        else
+                            more = false
+                    Failure(_, _) -> more = false
+            Success(result, current))
+
+
+rep1
+----
+
+One or more applications of `p`.
+
+    rep1[A](p: Parser[A]) -> Parser[[]A] =
+        Parser[[]A]((inp: Input) ->
+            p(inp) match
+                Failure(m, n) -> Failure(m, n)
+                Success(first, after) ->
+                    var result: []A = [first]
+                    var current = after
+                    var more = true
+                    while more do
+                        p(current) match
+                            Success(v, n) ->
+                                if n.offset > current.offset then
+                                    result = append(result, v)
+                                    current = n
+                                else
+                                    more = false
+                            Failure(_, _) -> more = false
+                    Success(result, current))
+
+
+chainl1
+-------
+
+Left-associative fold. `operand` parses a single value; `op` parses a
+binary combiner. `a OP b OP c` becomes `(a OP b) OP c`.
+
+    chainl1[A](operand: Parser[A], op: Parser[(A, A) -> A]) -> Parser[A] =
+        Parser[A]((inp: Input) ->
+            operand(inp) match
+                Failure(m, n) -> Failure(m, n)
+                Success(first, after) ->
+                    var acc = first
+                    var current = after
+                    var more = true
+                    while more do
+                        op(current) match
+                            Failure(_, _) -> more = false
+                            Success(f, n1) ->
+                                operand(n1) match
+                                    Failure(_, _) -> more = false
+                                    Success(v, n2) ->
+                                        acc = f(acc, v)
+                                        current = n2
+                    Success(acc, current))
+
+
+Operators
+---------
+
+Combinator-style infix operators via the user-defined-operator and
+multi-param-trait machinery. `~` for sequence, `|` for alternation,
+`~>` and `<~` for sequence-keep-right / sequence-keep-left, `^^` for
+map, `^^^` for replace-with-constant.
+
+    trait Concat[A, B, R]
+        #operator("~")
+        concat(a: A, b: B) -> R
+
+    impl[A, B] Concat[Parser[A], Parser[B], Parser[(A, B)]]
+        concat(a: Parser[A], b: Parser[B]) -> Parser[(A, B)] = seq(a, b)
+
+    trait Or[T]
+        #operator("|")
+        or_op(a: T, b: T) -> T
+
+    impl[A] Or[Parser[A]]
+        or_op(a: Parser[A], b: Parser[A]) -> Parser[A] = or(a, b)
+
+    trait SeqR[A, B, R]
+        #operator("~>")
+        seqr(a: A, b: B) -> R
+
+    impl[A, B] SeqR[Parser[A], Parser[B], Parser[B]]
+        seqr(a: Parser[A], b: Parser[B]) -> Parser[B] = seq_r(a, b)
+
+    trait SeqL[A, B, R]
+        #operator("<~")
+        seql(a: A, b: B) -> R
+
+    impl[A, B] SeqL[Parser[A], Parser[B], Parser[A]]
+        seql(a: Parser[A], b: Parser[B]) -> Parser[A] = seq_l(a, b)
+
+    trait Map[A, F, R]
+        #operator("^^")
+        pmap(a: A, f: F) -> R
+
+    impl[A, B] Map[Parser[A], (A) -> B, Parser[B]]
+        pmap(a: Parser[A], f: (A) -> B) -> Parser[B] = map(a, f)
+
+    trait MapTo[A, V, R]
+        #operator("^^^")
+        pmapto(a: A, v: V) -> R
+
+    impl[A, B] MapTo[Parser[A], B, Parser[B]]
+        pmapto(a: Parser[A], v: B) -> Parser[B] = map(a, (_: A) -> v)
+
+
+chainr1
+-------
+
+Right-associative fold. `a OP b OP c` becomes `a OP (b OP c)`.
+
+    chainr1[A](operand: Parser[A], op: Parser[(A, A) -> A]) -> Parser[A] =
+        Parser[A]((inp: Input) ->
+            operand(inp) match
+                Failure(m, n) -> Failure(m, n)
+                Success(first, after) ->
+                    var values: []A = [first]
+                    var ops: [](A, A) -> A = []
+                    var current = after
+                    var more = true
+                    while more do
+                        op(current) match
+                            Failure(_, _) -> more = false
+                            Success(f, n1) ->
+                                operand(n1) match
+                                    Failure(_, _) -> more = false
+                                    Success(v, n2) ->
+                                        ops = append(ops, f)
+                                        values = append(values, v)
+                                        current = n2
+                    var acc = values[len(values) - 1]
+                    var i = len(values) - 2
+                    while i >= 0 do
+                        acc = ops[i](values[i], acc)
+                        i = i - 1
+                    Success(acc, current))
+
+
+lazy_p
+------
+
+Defer parser construction until invocation. For non-left-recursive
+grammars where wrapping the body in a closure would be awkward.
+
+    lazy_p[A](thunk: () -> Parser[A]) -> Parser[A] =
+        Parser[A]((inp: Input) -> thunk()(inp))
+
+
+repsep / rep1sep
+----------------
+
+`p` separated by `sep`. `repsep` allows zero matches; `rep1sep` requires
+at least one. The trailing-sep case (sep succeeds but `p` fails) is
+treated as a hard failure — we'd already committed to the separator.
+
+    rep1sep[A, S](p: Parser[A], sep: Parser[S]) -> Parser[[]A] =
+        Parser[[]A]((inp: Input) ->
+            p(inp) match
+                Failure(m, n) -> Failure(m, n)
+                Success(first, after) ->
+                    var result: []A = [first]
+                    var current = after
+                    var status: ParseResult[[]A] = Success(result, current)
+                    var more = true
+                    while more do
+                        sep(current) match
+                            Failure(_, _) ->
+                                status = Success(result, current)
+                                more = false
+                            Success(_, n1) ->
+                                p(n1) match
+                                    Failure(m, n) ->
+                                        status = Failure(m, n)
+                                        more = false
+                                    Success(v, n2) ->
+                                        result = append(result, v)
+                                        current = n2
+                    status)
+
+    repsep[A, S](p: Parser[A], sep: Parser[S]) -> Parser[[]A] =
+        rep1sep(p, sep) | success[[]A]([])
+
+
+accept_if
+---------
+
+Read one byte if it satisfies the predicate. `label` is woven into the
+failure message — pass something the user can act on like `"digit"` or
+`"alpha"`.
+
+    accept_if(label: string, pred: (byte) -> bool) -> Parser[byte] =
+        Parser[byte]((inp: Input) ->
+            if inp.at_end() then
+                Failure(s"expected ${label}, got end of input", inp)
+            else
+                val b: byte = inp.source[inp.offset]
+                if pred(b) then Success(b, inp.advance(1))
+                else Failure(s"expected ${label}", inp))
+
+
+literal
+-------
+
+Match a literal string prefix. Uses `std.strings.has_prefix` over the
+unconsumed slice — empty string matches at every position.
+
+    literal(s: string) -> Parser[string] =
+        Parser[string]((inp: Input) ->
+            val rest = inp.source[inp.offset : len(inp.source)]
+            if has_prefix(rest, s) then
+                Success(s, inp.advance(len(s)))
+            else
+                Failure(s"expected literal '${s}'", inp))
+
+
+skip_ws / lex
+-------------
+
+ASCII whitespace handling. `skip_ws(p)` skips leading whitespace, then
+runs `p`. `lex(p)` runs `skip_ws(p)` and additionally consumes trailing
+whitespace, so lex-built parsers compose naturally — each leaves the
+cursor on the next non-whitespace byte.
+
+    is_ws_byte(b: byte) -> bool =
+        b == 0x20u8 || b == 0x09u8 || b == 0x0Au8 || b == 0x0Du8
+
+    skip_ws[A](p: Parser[A]) -> Parser[A] =
+        Parser[A]((inp: Input) ->
+            var i = inp.offset
+            while i < len(inp.source) && is_ws_byte(inp.source[i]) do
+                i = i + 1
+            p(Input(inp.source, i)))
+
+    lex[A](p: Parser[A]) -> Parser[A] =
+        Parser[A]((inp: Input) ->
+            skip_ws(p)(inp) match
+                Failure(m, n) -> Failure(m, n)
+                Success(v, after) ->
+                    var j = after.offset
+                    while j < len(after.source) && is_ws_byte(after.source[j]) do
+                        j = j + 1
+                    Success(v, Input(after.source, j)))
+
+
+parse_all
+---------
+
+Top-level entry: skip leading whitespace, run `p`, then require the
+input to be exhausted (modulo trailing whitespace).
+
+    parse_all[A](p: Parser[A], src: string) -> ParseResult[A] =
+        skip_ws(p <~ skip_ws(eoi()))(Input(src, 0))
+
+
+Expression-grammar demo
+-----------------------
+
+The headline showcase: a four-operator integer-arithmetic grammar with
+`+ - * /`, left-associative within each precedence level, parenthesized
+sub-expressions, and arbitrary whitespace between tokens. The whole
+grammar is six function bodies — every interesting line uses one of the
+operators (`~>`, `<~`, `|`, `^^`, `^^^`) or `chainl1`.
+
+    digit_p() -> Parser[byte] =
+        accept_if("digit", (b: byte) -> b >= 0x30u8 && b <= 0x39u8)
+
+    digits_to_int(bs: []byte) -> int =
+        var n = 0
+        for i in 0..<len(bs) do
+            n = n * 10 + int(bs[i] - 0x30u8)
+        n
+
+    number_p() -> Parser[int] =
+        lex(rep1(digit_p()) ^^ ((bs: []byte) -> digits_to_int(bs)))
+
+The op parsers each consume their token (with surrounding whitespace via
+`lex`) and return a binary `(int, int) -> int` combiner — exactly the
+shape `chainl1` consumes.
+
+The grammar. `factor` recurses back through `expr` for the parenthesized
+case — `lazy_p` defers that call until parse time so we don't loop at
+construction. Op tables are inlined: each `lex(literal("X")) ^^^ (_ OP _)`
+parses one token and lifts it to a binary combiner of the matching shape.
+
+    expr_p() -> Parser[int] =
+        chainl1[int](term_p(),
+            (lex(literal("+")) ^^^ (_ + _)) | (lex(literal("-")) ^^^ (_ - _)))
+
+    term_p() -> Parser[int] =
+        chainl1[int](factor_p(),
+            (lex(literal("*")) ^^^ (_ * _)) | (lex(literal("/")) ^^^ (_ / _)))
+
+    factor_p() -> Parser[int] =
+        number_p() | (lex(literal("(")) ~> lazy_p[int](() -> expr_p()) <~ lex(literal(")")))
+
+
+Tests
+-----
+
+    #test
+    test_success() -> unit
+        val p = success[int](42)
+        p(Input("hello", 0)) match
+            Success(v, _) -> expect(v, 42, "success returns its value")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_failure() -> unit
+        val p = failure[int]("nope")
+        p(Input("hello", 0)) match
+            Success(_, _) -> panic("failure should not succeed")
+            Failure(_, _) -> ()
+
+    #test
+    test_end_at_end() -> unit
+        val p = eoi()
+        p(Input("ab", 2)) match
+            Success(_, _) -> ()
+            Failure(_, _) -> panic("end should succeed at end of input")
+
+    #test
+    test_end_not_at_end() -> unit
+        val p = eoi()
+        p(Input("ab", 0)) match
+            Success(_, _) -> panic("end should fail mid-input")
+            Failure(_, _) -> ()
+
+    #test
+    test_map() -> unit
+        val p: Parser[int] = map(success[int](21), (x: int) -> x * 2)
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 42, "map doubles")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_seq_success() -> unit
+        val p = seq(success[int](1), success[int](2))
+        p(Input("", 0)) match
+            Success((a, b), _) ->
+                expect(a, 1, "seq first")
+                expect(b, 2, "seq second")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_or_first() -> unit
+        val p = or(success[int](1), success[int](2))
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 1, "or takes the first success")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_or_fallback() -> unit
+        val p = or(failure[int]("nope"), success[int](2))
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 2, "or falls back to second on first failure")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_opt_some() -> unit
+        val p = opt(success[int](7))
+        p(Input("", 0)) match
+            Success(o, _) ->
+                o match
+                    Some(v) -> expect(v, 7, "opt-Some carries value")
+                    None    -> panic("opt of success should be Some")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_opt_none() -> unit
+        val p = opt(failure[int]("nope"))
+        p(Input("hi", 2)) match
+            Success(o, n) ->
+                expect(n.offset, 2, "opt of failure does not advance")
+                o match
+                    Some(_) -> panic("opt of failure should be None")
+                    None    -> ()
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_rep_zero() -> unit
+        val p = rep(failure[int]("nope"))
+        p(Input("xx", 0)) match
+            Success(xs, n) ->
+                expect(len(xs), 0, "rep of always-failing yields empty slice")
+                expect(n.offset, 0, "rep does not advance on no matches")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_rep1_fail_on_zero() -> unit
+        val p = rep1(failure[int]("nope"))
+        p(Input("xx", 0)) match
+            Success(_, _) -> panic("rep1 should fail on zero matches")
+            Failure(_, _) -> ()
+
+    #test
+    test_rep1_appends() -> unit
+        // exercise the append path explicitly — the simple test cases above
+        // never trigger it, masking any bug in [first] -> append(result, v).
+        val p = rep1(literal("x"))
+        p(Input("xxx", 0)) match
+            Success(vs, n) ->
+                expect(len(vs), 3, "rep1 collects three xs")
+                expect(n.offset, 3, "rep1 consumes all xs")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_seq_l() -> unit
+        val p = seq_l(success[int](1), success[int](2))
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 1, "seq_l keeps left")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_seq_r() -> unit
+        val p = seq_r(success[int](1), success[int](2))
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 2, "seq_r keeps right")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_flat_map() -> unit
+        val p = flat_map(success[int](21), (x: int) -> success[int](x * 2))
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 42, "flat_map chains")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_op_seq() -> unit
+        val p = success[int](1) ~ success[int](2)
+        p(Input("", 0)) match
+            Success((a, b), _) ->
+                expect(a, 1, "~ first")
+                expect(b, 2, "~ second")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_op_or() -> unit
+        val p = failure[int]("nope") | success[int](2)
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 2, "| falls back")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_op_seqr() -> unit
+        val p = success[int](1) ~> success[int](2)
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 2, "~> keeps right")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_op_seql() -> unit
+        val p = success[int](1) <~ success[int](2)
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 1, "<~ keeps left")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_op_map() -> unit
+        val p: Parser[int] = success[int](21) ^^ ((x: int) -> x * 2)
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 42, "^^ maps")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_op_mapto() -> unit
+        val p: Parser[int] = success[int](999) ^^^ 7
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 7, "^^^ replaces")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_chainl1() -> unit
+        // smoke test: exercise the no-iteration path. `success[int](42)` consumes no
+        // input but the op (`failure`) fails immediately, so chainl1 returns the
+        // single operand. Using a non-failing op here would loop forever — both
+        // operand and op succeed without consuming input.
+        val no_op: Parser[(int, int) -> int] = failure[(int, int) -> int]("no op")
+        val one_only: Parser[int] = chainl1(success[int](42), no_op)
+        one_only(Input("", 0)) match
+            Success(v, _) -> expect(v, 42, "chainl1 with no ops returns the operand")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_chainr1_no_op() -> unit
+        // same shape as test_chainl1: no-iteration path, op fails immediately.
+        val no_op: Parser[(int, int) -> int] = failure[(int, int) -> int]("no op")
+        val one_only: Parser[int] = chainr1(success[int](42), no_op)
+        one_only(Input("", 0)) match
+            Success(v, _) -> expect(v, 42, "chainr1 with no ops returns the operand")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_lazy_p() -> unit
+        // thunk evaluates lazily on each call; the underlying parser is just success(7).
+        val p: Parser[int] = lazy_p[int](() -> success[int](7))
+        p(Input("", 0)) match
+            Success(v, _) -> expect(v, 7, "lazy_p delegates to thunked parser")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_literal_match() -> unit
+        val p = literal("foo")
+        p(Input("foobar", 0)) match
+            Success(v, n) ->
+                expect(n.offset, 3, "literal advances by length")
+                if v != "foo" then panic(s"unexpected value: ${v}")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_literal_no_match() -> unit
+        val p = literal("foo")
+        p(Input("bar", 0)) match
+            Success(_, _) -> panic("literal should have failed")
+            Failure(_, n) -> expect(n.offset, 0, "literal does not consume on failure")
+
+    #test
+    test_accept_if_digit() -> unit
+        val digit: Parser[byte] =
+            accept_if("digit", (b: byte) -> b >= 0x30u8 && b <= 0x39u8)
+        digit(Input("7x", 0)) match
+            Success(v, n) ->
+                expect(n.offset, 1, "accept_if advances by one")
+                if v != 0x37u8 then panic(s"unexpected byte")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_accept_if_at_end() -> unit
+        val digit: Parser[byte] =
+            accept_if("digit", (b: byte) -> b >= 0x30u8 && b <= 0x39u8)
+        digit(Input("", 0)) match
+            Success(_, _) -> panic("should have failed at end of input")
+            Failure(_, n) -> expect(n.offset, 0, "accept_if at end does not advance")
+
+    #test
+    test_repsep_zero() -> unit
+        // empty input: repsep returns the empty vector via the success-fallback branch.
+        val item = literal("x")
+        val sep = literal(",")
+        val p = repsep(item, sep)
+        p(Input("", 0)) match
+            Success(vs, n) ->
+                expect(len(vs), 0, "repsep on empty input returns []")
+                expect(n.offset, 0, "no consumption")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_rep1sep_basic() -> unit
+        val item = literal("x")
+        val sep = literal(",")
+        val p = rep1sep(item, sep)
+        p(Input("x,x,x", 0)) match
+            Success(vs, n) ->
+                expect(len(vs), 3, "three items")
+                expect(n.offset, 5, "consumed all five bytes")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_skip_ws() -> unit
+        val p = skip_ws[string](literal("hi"))
+        p(Input("   hi", 0)) match
+            Success(v, n) ->
+                expect(n.offset, 5, "skipped 3 spaces and consumed 'hi'")
+                if v != "hi" then panic(s"unexpected value: ${v}")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_lex_trailing_ws() -> unit
+        val p = lex[string](literal("hi"))
+        p(Input("hi   ", 0)) match
+            Success(_, n) -> expect(n.offset, 5, "lex consumes trailing ws")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_parse_all_success() -> unit
+        val p = literal("hi")
+        parse_all[string](p, "  hi  ") match
+            Success(v, _) ->
+                if v != "hi" then panic(s"unexpected value: ${v}")
+            Failure(m, _) -> panic(s"parse_all should succeed: ${m}")
+
+    #test
+    test_parse_all_trailing_garbage() -> unit
+        val p = literal("hi")
+        parse_all[string](p, "hi xx") match
+            Success(_, _) -> panic("parse_all should have rejected trailing garbage")
+            Failure(_, _) -> ()
+
+    #test
+    test_expr_atom() -> unit
+        parse_all[int](expr_p(), "42") match
+            Success(v, _) -> expect(v, 42, "single number")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_add_sub_left_assoc() -> unit
+        // 10 - 3 - 2 should be (10 - 3) - 2 = 5, not 10 - (3 - 2) = 9
+        parse_all[int](expr_p(), "10 - 3 - 2") match
+            Success(v, _) -> expect(v, 5, "left-assoc subtraction")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_precedence() -> unit
+        parse_all[int](expr_p(), "2 + 3 * 4") match
+            Success(v, _) -> expect(v, 14, "* before +")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_parens() -> unit
+        parse_all[int](expr_p(), "(2 + 3) * 4") match
+            Success(v, _) -> expect(v, 20, "parens override precedence")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_nested_parens() -> unit
+        parse_all[int](expr_p(), "((1 + 2) * (3 + 4))") match
+            Success(v, _) -> expect(v, 21, "nested parens compute")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_div_left_assoc() -> unit
+        // 100 / 5 / 2 should be 20 / 2 = 10, not 100 / 2 = 50 (then / 5 = 10 — same answer)
+        // pick numbers that diverge: 100 / 10 / 2 = 10 / 2 = 5, vs 100 / (10 / 2) = 100 / 5 = 20
+        parse_all[int](expr_p(), "100 / 10 / 2") match
+            Success(v, _) -> expect(v, 5, "left-assoc division")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_whitespace_robust() -> unit
+        parse_all[int](expr_p(), "  1+2 *  3  ") match
+            Success(v, _) -> expect(v, 7, "tolerates arbitrary whitespace")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_rejects_garbage() -> unit
+        parse_all[int](expr_p(), "1 + abc") match
+            Success(_, _) -> panic("should reject 'abc' as a factor")
+            Failure(_, _) -> ()
