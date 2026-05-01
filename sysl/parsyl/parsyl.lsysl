@@ -793,31 +793,29 @@ Tests
             Success(_, n) -> expect(n.offset, 0, "no advance on success")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
-    // TODO: un-comment once `&` parser accepts non-identifier operands
-    // (see /tmp/sysl_fix_amp_parser_loosen.md). Today `&q` works for
-    // local `q`, but `&(literal(...))` and `&literal("...")` fail at
-    // parse time — `&` still requires bare-identifier lvalue.
-    //
-    // #test
-    // test_amp_sugar_match_succeeds() -> unit
-    //     val p = &(literal("hi"))
-    //     p(Input(as_bytes("hi!"), 0)) match
-    //         Success(v, n) ->
-    //             if v != "hi" then panic("expected 'hi'")
-    //             expect(n.offset, 0, "and_p does not advance")
-    //         Failure(m, _) -> panic(s"unexpected failure: ${m}")
-    //
-    // #test
-    // test_bang_amp_natural_compose() -> unit
-    //     val p = &(literal("ab")) ~> (literal("ab") <~ !(literal("c")))
-    //     p(Input(as_bytes("abx"), 0)) match
-    //         Success(v, n) ->
-    //             if v != "ab" then panic("expected 'ab'")
-    //             expect(n.offset, 2, "consumed exactly 'ab'")
-    //         Failure(m, _) -> panic(s"unexpected failure: ${m}")
-    //     p(Input(as_bytes("abc"), 0)) match
-    //         Success(_, _) -> panic("should reject 'ab' followed by 'c'")
-    //         Failure(_, _) -> ()
+    #test
+    test_amp_sugar_match_succeeds() -> unit
+        // &p as prefix-operator sugar for and_p(p).
+        val p = &(literal("hi"))
+        p(Input(as_bytes("hi!"), 0)) match
+            Success(v, n) ->
+                if v != "hi" then panic("expected 'hi'")
+                expect(n.offset, 0, "and_p does not advance")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_bang_amp_natural_compose() -> unit
+        // The headline PEG compose: peek "ab" via &, then guard against
+        // a final "c" via !, then consume "ab".
+        val p = &(literal("ab")) ~> (literal("ab") <~ !(literal("c")))
+        p(Input(as_bytes("abx"), 0)) match
+            Success(v, n) ->
+                if v != "ab" then panic("expected 'ab'")
+                expect(n.offset, 2, "consumed exactly 'ab'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+        p(Input(as_bytes("abc"), 0)) match
+            Success(_, _) -> panic("should reject 'ab' followed by 'c'")
+            Failure(_, _) -> ()
 
     #test
     test_rep_zero() -> unit
