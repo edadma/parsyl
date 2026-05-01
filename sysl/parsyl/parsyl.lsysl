@@ -172,6 +172,18 @@ to user impls for other operand types).
     impl[A] Peek[Parser[A], Parser[A]]
         peek_op(p: Parser[A]) -> Parser[A] = and_p(p)
 
+Bare-string operands lift to `lex(literal(s))` here too, so a
+grammar can write `&"ab"` and `!"c"` directly without spelling
+`literal`. The lifted parser parses the string token (with
+surrounding whitespace), so `!"c"` reads as "must not be the
+literal token 'c' next".
+
+    impl Not[string, Parser[unit]]
+        not_op(s: string) -> Parser[unit] = not_p(lex(literal(s)))
+
+    impl Peek[string, Parser[string]]
+        peek_op(s: string) -> Parser[string] = and_p(lex(literal(s)))
+
 
 rep
 ---
@@ -805,9 +817,10 @@ Tests
 
     #test
     test_bang_amp_natural_compose() -> unit
-        // The headline PEG compose: peek "ab" via &, then guard against
-        // a final "c" via !, then consume "ab".
-        val p = &(literal("ab")) ~> (literal("ab") <~ !(literal("c")))
+        // The headline PEG compose: peek "ab" via &, then consume "ab",
+        // guarded against a final "c". Bare-string operands lift to
+        // lex(literal(...)) — no `literal` keyword needed.
+        val p = &"ab" ~> ("ab" <~ !"c")
         p(Input(as_bytes("abx"), 0)) match
             Success(v, n) ->
                 if v != "ab" then panic("expected 'ab'")
