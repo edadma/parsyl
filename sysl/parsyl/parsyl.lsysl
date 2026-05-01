@@ -55,7 +55,7 @@ Trivial parsers
 eoi
 ---
 
-    eoi() -> Parser[unit] =
+    eoi -> Parser[unit] =
         Parser[unit]((inp: Input) ->
             if inp.at_end() then Success((), inp)
             else Failure("expected end of input", inp))
@@ -223,17 +223,28 @@ map, `^^^` for replace-with-constant.
 
     trait SeqR[A, B, R]
         #operator("~>")
-        seqr(a: A, b: B) -> R
+        seqr(a: A, b: => B) -> R
 
     impl[A, B] SeqR[Parser[A], Parser[B], Parser[B]]
-        seqr(a: Parser[A], b: Parser[B]) -> Parser[B] = seq_r(a, b)
+        seqr(a: Parser[A], b: => Parser[B]) -> Parser[B] =
+            Parser[B]((inp: Input) ->
+                a(inp) match
+                    Failure(m, n) -> Failure(m, n)
+                    Success(_, na) -> b(na))
 
     trait SeqL[A, B, R]
         #operator("<~")
-        seql(a: A, b: B) -> R
+        seql(a: A, b: => B) -> R
 
     impl[A, B] SeqL[Parser[A], Parser[B], Parser[A]]
-        seql(a: Parser[A], b: Parser[B]) -> Parser[A] = seq_l(a, b)
+        seql(a: Parser[A], b: => Parser[B]) -> Parser[A] =
+            Parser[A]((inp: Input) ->
+                a(inp) match
+                    Failure(m, n) -> Failure(m, n)
+                    Success(va, na) ->
+                        b(na) match
+                            Failure(m, n) -> Failure(m, n)
+                            Success(_, nb) -> Success(va, nb))
 
     trait Map[A, F, R]
         #operator("^^")
@@ -266,16 +277,29 @@ read like the Scala parser-combinator idiom: `"(" ~> expr <~ ")"`.
         concat(a: Parser[A], s: string) -> Parser[(A, string)] = seq(a, lex(literal(s)))
 
     impl[B] SeqR[string, Parser[B], Parser[B]]
-        seqr(s: string, b: Parser[B]) -> Parser[B] = seq_r(lex(literal(s)), b)
+        seqr(s: string, b: => Parser[B]) -> Parser[B] =
+            val sp = lex(literal(s))
+            Parser[B]((inp: Input) ->
+                sp(inp) match
+                    Failure(m, n) -> Failure(m, n)
+                    Success(_, na) -> b(na))
 
     impl[A] SeqR[Parser[A], string, Parser[string]]
-        seqr(a: Parser[A], s: string) -> Parser[string] = seq_r(a, lex(literal(s)))
+        seqr(a: Parser[A], s: => string) -> Parser[string] = seq_r(a, lex(literal(s)))
 
     impl[B] SeqL[string, Parser[B], Parser[string]]
-        seql(s: string, b: Parser[B]) -> Parser[string] = seq_l(lex(literal(s)), b)
+        seql(s: string, b: => Parser[B]) -> Parser[string] =
+            val sp = lex(literal(s))
+            Parser[string]((inp: Input) ->
+                sp(inp) match
+                    Failure(m, n) -> Failure(m, n)
+                    Success(va, na) ->
+                        b(na) match
+                            Failure(m, n) -> Failure(m, n)
+                            Success(_, nb) -> Success(va, nb))
 
     impl[A] SeqL[Parser[A], string, Parser[A]]
-        seql(a: Parser[A], s: string) -> Parser[A] = seq_l(a, lex(literal(s)))
+        seql(a: Parser[A], s: => string) -> Parser[A] = seq_l(a, lex(literal(s)))
 
 
 chainr1
@@ -424,7 +448,7 @@ Top-level entry: skip leading whitespace, run `p`, then require the
 input to be exhausted (modulo trailing whitespace).
 
     parse_all[A](p: Parser[A], src: string) -> ParseResult[A] =
-        skip_ws(p <~ skip_ws(eoi()))(mk_input(src))
+        skip_ws(p <~ skip_ws(eoi))(mk_input(src))
 
 
 Expression-grammar demo
@@ -436,7 +460,7 @@ sub-expressions, and arbitrary whitespace between tokens. The whole
 grammar is six function bodies — every interesting line uses one of the
 operators (`~>`, `<~`, `|`, `^^`, `^^^`) or `chainl1`.
 
-    digit_p() -> Parser[char] =
+    digit -> Parser[char] =
         accept_if("digit", (c: char) -> '0' <= c <= '9')
 
     digits_to_int(cs: []char) -> int =
@@ -445,26 +469,72 @@ operators (`~>`, `<~`, `|`, `^^`, `^^^`) or `chainl1`.
             n = n * 10 + int(cs[i] - '0')
         n
 
-    number_p() -> Parser[int] =
-        lex(rep1(digit_p()) ^^ ((cs: []char) -> digits_to_int(cs)))
+    number -> Parser[int] =
+        lex(rep1(digit) ^^ ((cs: []char) -> digits_to_int(cs)))
 
 The op parsers each consume their token (with surrounding whitespace via
 `lex`) and return a binary `(int, int) -> int` combiner — exactly the
 shape `chainl1` consumes.
 
-The grammar. `factor` recurses back through `expr` for the parenthesized
-case — `lazy_p` defers that call until parse time so we don't loop at
-construction. Op tables are inlined: each `lex(literal("X")) ^^^ (_ OP _)`
-parses one token and lifts it to a binary combiner of the matching shape.
+The grammar itself. `factor` recurses back through `expr` for the
+parenthesized case; the `~>` and `<~` impls take their second arg
+by-name (`b: => Parser[B]`), so the recursive `expr` call defers to
+parse time and we don't loop at construction. Op tables are inlined:
+each `"X" ^^^ (_ OP _)` lifts a token to a binary combiner.
 
-    expr_p() -> Parser[int] =
-        chainl1(term_p(), ("+" ^^^ (_ + _)) | ("-" ^^^ (_ - _)))
+    expr -> Parser[int] =
+        chainl1(term, ("+" ^^^ (_ + _)) | ("-" ^^^ (_ - _)))
 
-    term_p() -> Parser[int] =
-        chainl1(factor_p(), ("*" ^^^ (_ * _)) | ("/" ^^^ (_ / _)))
+    term -> Parser[int] =
+        chainl1(factor, ("*" ^^^ (_ * _)) | ("/" ^^^ (_ / _)))
 
-    factor_p() -> Parser[int] =
-        number_p() | ("(" ~> lazy_p(() -> expr_p()) <~ ")")
+    factor -> Parser[int] =
+        number | ("(" ~> expr <~ ")") | (("-" ~> factor) ^^ (-_))
+
+
+AST-building expression parser
+------------------------------
+
+Same grammar, but the parser returns a syntax tree instead of computing
+the value inline. A separate `eval` walks the tree. This mirrors the
+shape of a real compiler frontend: parser produces typed AST, downstream
+passes consume it (typecheck, optimize, evaluate, codegen).
+
+    enum Expr
+        Num(value: int)
+        Add(left: Expr, right: Expr)
+        Sub(left: Expr, right: Expr)
+        Mul(left: Expr, right: Expr)
+        Div(left: Expr, right: Expr)
+        Neg(operand: Expr)
+
+    eval(e: Expr) -> int =
+        e match
+            Num(v) -> v
+            Add(l, r) -> eval(l) + eval(r)
+            Sub(l, r) -> eval(l) - eval(r)
+            Mul(l, r) -> eval(l) * eval(r)
+            Div(l, r) -> eval(l) / eval(r)
+            Neg(o) -> -eval(o)
+
+The parser. Same shape as before, but each combiner constructs an
+`Expr` node instead of folding an `int`.
+
+    enumber -> Parser[Expr] =
+        lex(rep1(digit) ^^ ((cs: []char) -> Num(digits_to_int(cs))))
+
+    eexpr -> Parser[Expr] =
+        chainl1(eterm,
+            ("+" ^^^ ((a: Expr, b: Expr) -> Add(a, b))) |
+                ("-" ^^^ ((a: Expr, b: Expr) -> Sub(a, b))))
+
+    eterm -> Parser[Expr] =
+        chainl1(efactor,
+            ("*" ^^^ ((a: Expr, b: Expr) -> Mul(a, b))) |
+                ("/" ^^^ ((a: Expr, b: Expr) -> Div(a, b))))
+
+    efactor -> Parser[Expr] =
+        enumber | ("(" ~> eexpr <~ ")") | (("-" ~> efactor) ^^ ((e: Expr) -> Neg(e)))
 
 
 Tests
@@ -486,14 +556,14 @@ Tests
 
     #test
     test_end_at_end() -> unit
-        val p = eoi()
+        val p = eoi
         p(Input(as_bytes("ab"), 2)) match
             Success(_, _) -> ()
             Failure(_, _) -> panic("end should succeed at end of input")
 
     #test
     test_end_not_at_end() -> unit
-        val p = eoi()
+        val p = eoi
         p(Input(as_bytes("ab"), 0)) match
             Success(_, _) -> panic("end should fail mid-input")
             Failure(_, _) -> ()
@@ -760,32 +830,32 @@ Tests
 
     #test
     test_expr_atom() -> unit
-        parse_all[int](expr_p(), "42") match
+        parse_all[int](expr(), "42") match
             Success(v, _) -> expect(v, 42, "single number")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_expr_add_sub_left_assoc() -> unit
         // 10 - 3 - 2 should be (10 - 3) - 2 = 5, not 10 - (3 - 2) = 9
-        parse_all[int](expr_p(), "10 - 3 - 2") match
+        parse_all[int](expr(), "10 - 3 - 2") match
             Success(v, _) -> expect(v, 5, "left-assoc subtraction")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_expr_precedence() -> unit
-        parse_all[int](expr_p(), "2 + 3 * 4") match
+        parse_all[int](expr(), "2 + 3 * 4") match
             Success(v, _) -> expect(v, 14, "* before +")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_expr_parens() -> unit
-        parse_all[int](expr_p(), "(2 + 3) * 4") match
+        parse_all[int](expr(), "(2 + 3) * 4") match
             Success(v, _) -> expect(v, 20, "parens override precedence")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_expr_nested_parens() -> unit
-        parse_all[int](expr_p(), "((1 + 2) * (3 + 4))") match
+        parse_all[int](expr(), "((1 + 2) * (3 + 4))") match
             Success(v, _) -> expect(v, 21, "nested parens compute")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
@@ -793,18 +863,89 @@ Tests
     test_expr_div_left_assoc() -> unit
         // 100 / 5 / 2 should be 20 / 2 = 10, not 100 / 2 = 50 (then / 5 = 10 — same answer)
         // pick numbers that diverge: 100 / 10 / 2 = 10 / 2 = 5, vs 100 / (10 / 2) = 100 / 5 = 20
-        parse_all[int](expr_p(), "100 / 10 / 2") match
+        parse_all[int](expr(), "100 / 10 / 2") match
             Success(v, _) -> expect(v, 5, "left-assoc division")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_expr_whitespace_robust() -> unit
-        parse_all[int](expr_p(), "  1+2 *  3  ") match
+        parse_all[int](expr(), "  1+2 *  3  ") match
             Success(v, _) -> expect(v, 7, "tolerates arbitrary whitespace")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
     test_expr_rejects_garbage() -> unit
-        parse_all[int](expr_p(), "1 + abc") match
+        parse_all[int](expr(), "1 + abc") match
             Success(_, _) -> panic("should reject 'abc' as a factor")
             Failure(_, _) -> ()
+
+    #test
+    test_expr_unary_neg() -> unit
+        parse_all[int](expr(), "-5") match
+            Success(v, _) -> expect(v, -5, "unary minus on number")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_unary_neg_in_add() -> unit
+        // -2 + 3: unary minus binds tighter than the additive level
+        parse_all[int](expr(), "-2 + 3") match
+            Success(v, _) -> expect(v, 1, "-2 + 3 = 1")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_binary_minus_then_unary() -> unit
+        // 2--3: binary `-` followed by unary `-` on 3 (no spaces)
+        parse_all[int](expr(), "2--3") match
+            Success(v, _) -> expect(v, 5, "2--3 = 5")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_unary_neg_paren() -> unit
+        parse_all[int](expr(), "-(2 + 3)") match
+            Success(v, _) -> expect(v, -5, "-(2 + 3) = -5")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_double_neg() -> unit
+        parse_all[int](expr(), "--5") match
+            Success(v, _) -> expect(v, 5, "--5 = 5")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_atom() -> unit
+        parse_all[Expr](eexpr(), "42") match
+            Success(t, _) -> expect(eval(t), 42, "atom AST evaluates")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_precedence() -> unit
+        parse_all[Expr](eexpr(), "2 + 3 * 4") match
+            Success(t, _) ->
+                // Tree should be Add(Num(2), Mul(Num(3), Num(4)))
+                expect(eval(t), 14, "eval of (2 + 3*4) AST")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_nested_parens() -> unit
+        parse_all[Expr](eexpr(), "((1 + 2) * (3 + 4))") match
+            Success(t, _) -> expect(eval(t), 21, "eval of nested-paren AST")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_unary_neg() -> unit
+        parse_all[Expr](eexpr(), "-(2 + 3)") match
+            Success(t, _) -> expect(eval(t), -5, "eval of -(2+3) AST")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_tree_shape() -> unit
+        // Confirm the parser actually builds the right tree shape, not just
+        // an equivalent value.
+        parse_all[Expr](eexpr(), "1 - 2") match
+            Success(t, _) ->
+                t match
+                    Sub(l, r) ->
+                        expect(eval(l), 1, "left side evaluates to 1")
+                        expect(eval(r), 2, "right side evaluates to 2")
+                    _ -> panic("expected Sub at the top of the tree")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
