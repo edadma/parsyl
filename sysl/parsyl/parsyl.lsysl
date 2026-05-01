@@ -138,11 +138,13 @@ value if `p` would succeed at the current position, fails otherwise.
 Again, the cursor doesn't advance.
 
 Together they express PEG-style guards naturally:
-`and_p(letter) ~> rep1(alphanum)` to require the run starts with a
-letter, or `not_p(reserved_word) ~> ident` to reject reserved words.
+`&letter ~> rep1(alphanum)` to require the run starts with a letter,
+or `!reserved ~> ident` to reject reserved words.
 
-Once prefix-operator overloading lands these will get `!p` and `&p`
-sugar via dedicated traits — the underlying functions are stable.
+The `!` and `&` sugar dispatches to the function form via dedicated
+traits — `!` and `&` overload the built-in prefix sigils (which keep
+their `!bool` / `&lvalue` semantics on those types and only delegate
+to user impls for other operand types).
 
     not_p[A](p: Parser[A]) -> Parser[unit] =
         Parser[unit]((inp: Input) ->
@@ -155,6 +157,20 @@ sugar via dedicated traits — the underlying functions are stable.
             p(inp) match
                 Success(v, _) -> Success(v, inp)
                 Failure(m, n) -> Failure(m, n))
+
+    trait Not[A, R]
+        #operator("!")
+        not_op(a: A) -> R
+
+    impl[A] Not[Parser[A], Parser[unit]]
+        not_op(p: Parser[A]) -> Parser[unit] = not_p(p)
+
+    trait Peek[A, R]
+        #operator("&")
+        peek_op(a: A) -> R
+
+    impl[A] Peek[Parser[A], Parser[A]]
+        peek_op(p: Parser[A]) -> Parser[A] = and_p(p)
 
 
 rep
@@ -761,6 +777,47 @@ Tests
                 if v != "abc" then panic("expected 'abc'")
                 expect(n.offset, 3, "consumed 'abc' after and_p")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_bang_sugar_match_fails() -> unit
+        // !p as prefix-operator sugar for not_p(p).
+        val p = !(literal("abc"))
+        p(Input(as_bytes("abc"), 0)) match
+            Success(_, _) -> panic("!p should fail when p succeeds")
+            Failure(_, n) -> expect(n.offset, 0, "no advance on failure")
+
+    #test
+    test_bang_sugar_no_match_succeeds() -> unit
+        val p = !(literal("abc"))
+        p(Input(as_bytes("xyz"), 0)) match
+            Success(_, n) -> expect(n.offset, 0, "no advance on success")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    // TODO: un-comment once `&` parser accepts non-identifier operands
+    // (see /tmp/sysl_fix_amp_parser_loosen.md). Today `&q` works for
+    // local `q`, but `&(literal(...))` and `&literal("...")` fail at
+    // parse time — `&` still requires bare-identifier lvalue.
+    //
+    // #test
+    // test_amp_sugar_match_succeeds() -> unit
+    //     val p = &(literal("hi"))
+    //     p(Input(as_bytes("hi!"), 0)) match
+    //         Success(v, n) ->
+    //             if v != "hi" then panic("expected 'hi'")
+    //             expect(n.offset, 0, "and_p does not advance")
+    //         Failure(m, _) -> panic(s"unexpected failure: ${m}")
+    //
+    // #test
+    // test_bang_amp_natural_compose() -> unit
+    //     val p = &(literal("ab")) ~> (literal("ab") <~ !(literal("c")))
+    //     p(Input(as_bytes("abx"), 0)) match
+    //         Success(v, n) ->
+    //             if v != "ab" then panic("expected 'ab'")
+    //             expect(n.offset, 2, "consumed exactly 'ab'")
+    //         Failure(m, _) -> panic(s"unexpected failure: ${m}")
+    //     p(Input(as_bytes("abc"), 0)) match
+    //         Success(_, _) -> panic("should reject 'ab' followed by 'c'")
+    //         Failure(_, _) -> ()
 
     #test
     test_rep_zero() -> unit
