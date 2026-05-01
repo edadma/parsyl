@@ -241,6 +241,34 @@ map, `^^^` for replace-with-constant.
     impl[A, B] MapTo[Parser[A], B, Parser[B]]
         pmapto(a: Parser[A], v: B) -> Parser[B] = map(a, (_: A) -> v)
 
+    impl[B] MapTo[string, B, Parser[B]]
+        pmapto(s: string, v: B) -> Parser[B] = map(lex(literal(s)), (_: string) -> v)
+
+    impl[B] Map[string, (string) -> B, Parser[B]]
+        pmap(s: string, f: (string) -> B) -> Parser[B] = map(lex(literal(s)), f)
+
+A string literal in operator position lifts itself to `lex(literal(s))`
+— skips surrounding whitespace and matches the token. Lets grammars
+read like the Scala parser-combinator idiom: `"(" ~> expr <~ ")"`.
+
+    impl[B] Concat[string, Parser[B], Parser[(string, B)]]
+        concat(s: string, b: Parser[B]) -> Parser[(string, B)] = seq(lex(literal(s)), b)
+
+    impl[A] Concat[Parser[A], string, Parser[(A, string)]]
+        concat(a: Parser[A], s: string) -> Parser[(A, string)] = seq(a, lex(literal(s)))
+
+    impl[B] SeqR[string, Parser[B], Parser[B]]
+        seqr(s: string, b: Parser[B]) -> Parser[B] = seq_r(lex(literal(s)), b)
+
+    impl[A] SeqR[Parser[A], string, Parser[string]]
+        seqr(a: Parser[A], s: string) -> Parser[string] = seq_r(a, lex(literal(s)))
+
+    impl[B] SeqL[string, Parser[B], Parser[string]]
+        seql(s: string, b: Parser[B]) -> Parser[string] = seq_l(lex(literal(s)), b)
+
+    impl[A] SeqL[Parser[A], string, Parser[A]]
+        seql(a: Parser[A], s: string) -> Parser[A] = seq_l(a, lex(literal(s)))
+
 
 chainr1
 -------
@@ -421,15 +449,13 @@ construction. Op tables are inlined: each `lex(literal("X")) ^^^ (_ OP _)`
 parses one token and lifts it to a binary combiner of the matching shape.
 
     expr_p() -> Parser[int] =
-        chainl1[int](term_p(),
-            (lex(literal("+")) ^^^ (_ + _)) | (lex(literal("-")) ^^^ (_ - _)))
+        chainl1(term_p(), ("+" ^^^ (_ + _)) | ("-" ^^^ (_ - _)))
 
     term_p() -> Parser[int] =
-        chainl1[int](factor_p(),
-            (lex(literal("*")) ^^^ (_ * _)) | (lex(literal("/")) ^^^ (_ / _)))
+        chainl1(factor_p(), ("*" ^^^ (_ * _)) | ("/" ^^^ (_ / _)))
 
     factor_p() -> Parser[int] =
-        number_p() | (lex(literal("(")) ~> lazy_p[int](() -> expr_p()) <~ lex(literal(")")))
+        number_p() | ("(" ~> lazy_p(() -> expr_p()) <~ ")")
 
 
 Tests
