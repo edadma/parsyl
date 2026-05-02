@@ -1,9 +1,12 @@
 parsyl — combinator parser library
 ===================================
 
-Sysl port of the Scala reference at
-`shared/src/main/scala/io/github/edadma/parsyl/Parsers.scala`. Targets
-sysl `dev`.
+The first sysl-native parser combinator library. Provides the usual
+core combinators plus operator sugar (`~`, `|`, `~>`, `<~`, `^^`,
+`^^^`, plus PEG-style `!p` / `&p`) and bare-string operand lifting,
+so grammars read like the canonical Scala parser-combinator idiom.
+
+    module parsyl
 
     import std.option.{Option, Some, None}
     import std.bytes.{as_bytes, has_prefix}
