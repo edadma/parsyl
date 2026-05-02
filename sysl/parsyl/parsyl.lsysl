@@ -642,8 +642,8 @@ list of expressions (zero or more — `f()` is valid). `repsep` produces
 the `[]Expr` directly.
 
     eapp -> Parser[Expr] =
-        val build = (p: (string, []Expr)) -> App(p._0, p._1)
-        (ident ~ ("(" ~> repsep(eexpr, lex(literal(","))) <~ ")")) ^^ build
+        (ident ~ ("(" ~> repsep(eexpr, lex(literal(","))) <~ ")")) ^^
+            ((p: (string, []Expr)) -> App(p._0, p._1))
 
     efactor -> Parser[Expr] =
         eapp | enumber | ("(" ~> eexpr <~ ")") | (("-" ~> efactor) ^^ ((e: Expr) -> Neg(e)))
@@ -920,6 +920,32 @@ Tests
         val p: Parser[int] = success[int](999) ^^^ 7
         p(Input(as_bytes(""), 0)) match
             Success(v, _) -> expect(v, 7, "^^^ replaces")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_op_caret_newline_continuation() -> unit
+        // A trailing user-defined infix op should let the RHS lambda live on
+        // the next indented line. Pre-fix this was a parse error.
+        val p = success[int](7) ^^
+            ((x: int) -> x * 2)
+        p(Input(as_bytes(""), 0)) match
+            Success(v, _) -> expect(v, 14, "^^ across newline = 14")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_op_pipe_newline_continuation() -> unit
+        val p = failure[int]("nope") |
+            success[int](42)
+        p(Input(as_bytes(""), 0)) match
+            Success(v, _) -> expect(v, 42, "| across newline = 42")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_op_seqr_newline_continuation() -> unit
+        val p = success[int](1) ~>
+            success[int](2)
+        p(Input(as_bytes(""), 0)) match
+            Success(v, _) -> expect(v, 2, "~> across newline = 2")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
 
     #test
