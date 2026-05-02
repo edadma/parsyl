@@ -1,0 +1,413 @@
+parsyl — expression-grammar demos
+=================================
+
+Two parallel grammars for the same arithmetic surface, as a tour of the
+combinator library against a non-trivial parse target. The first folds
+each construct into an `int` directly (inline-evaluating); the second
+returns an `Expr` syntax tree and a separate `eval` walks it. Both share
+operator precedence, associativity, parentheses, unary negation, and
+function-call syntax `f(a, b, c)` lifted to `App(name, []Expr)`.
+
+Lives in its own file (alongside `parsyl/parsyl.lsysl` under `module
+parsyl`) so users importing the library don't pay any analyzer cost on
+the demos unless they explicitly want the `expr` / `eexpr` / `eval`
+symbols.
+
+    module parsyl
+
+    import std.strconv.{parse_int}
+    import std.result.{unwrap}
+
+
+Inline-evaluating expression parser
+-----------------------------------
+
+`number` and `ident` are written with the regex extension on string —
+the regex engine handles the whole token in one step, and the result is
+already a `string` (no `[]char`/`StrBuilder` accumulation).
+
+    number -> Parser[int] =
+        lex("[0-9]+".r) ^^ ((s: string) -> unwrap(parse_int(s)))
+
+    ident -> Parser[string] =
+        lex("[A-Za-z][A-Za-z0-9]*".r)
+
+The grammar itself. `factor` recurses back through `expr` for the
+parenthesized case; the `~>` and `<~` impls take their second arg
+by-name (`b: => Parser[B]`), so the recursive `expr` call defers to
+parse time and we don't loop at construction. Op tables are inlined:
+each `"X" ^^^ (_ OP _)` lifts a token to a binary combiner.
+
+    expr -> Parser[int] =
+        chainl1(term, ("+" ^^^ (_ + _)) | ("-" ^^^ (_ - _)))
+
+    term -> Parser[int] =
+        chainl1(factor, ("*" ^^^ (_ * _)) | ("/" ^^^ (_ / _)))
+
+    factor -> Parser[int] =
+        number | ("(" ~> expr <~ ")") | (("-" ~> factor) ^^ (-_))
+
+
+AST-building expression parser
+------------------------------
+
+Same grammar shape, but each combiner constructs an `Expr` node instead
+of folding an `int`. A separate `eval` walks the tree, mirroring the
+shape of a real compiler frontend (parser produces typed AST,
+downstream passes consume it).
+
+    enum Expr
+        Num(value: int)
+        Add(left: Expr, right: Expr)
+        Sub(left: Expr, right: Expr)
+        Mul(left: Expr, right: Expr)
+        Div(left: Expr, right: Expr)
+        Neg(operand: Expr)
+        App(name: string, args: []Expr)
+
+    eval(e: Expr) -> int =
+        e match
+            Num(v) -> v
+            Add(l, r) -> eval(l) + eval(r)
+            Sub(l, r) -> eval(l) - eval(r)
+            Mul(l, r) -> eval(l) * eval(r)
+            Div(l, r) -> eval(l) / eval(r)
+            Neg(o) -> -eval(o)
+            App(name, args) -> eval_app(name, args)
+
+`eval_app` dispatches on the function name. A real interpreter would
+look the name up in an environment; here we hard-code a tiny set of
+builtins (`max`, `min`, `abs`) so the App tests can check eval output
+as well as tree shape.
+
+    eval_app(name: string, args: []Expr) -> int =
+        if name == "max" then
+            if len(args) != 2 then panic("max needs 2 args")
+            val a = eval(args[0])
+            val b = eval(args[1])
+            return if a > b then a else b
+        if name == "min" then
+            if len(args) != 2 then panic("min needs 2 args")
+            val a = eval(args[0])
+            val b = eval(args[1])
+            return if a < b then a else b
+        if name == "abs" then
+            if len(args) != 1 then panic("abs needs 1 arg")
+            val a = eval(args[0])
+            return if a < 0 then -a else a
+        panic("unknown function")
+
+Same shape as before, but each combiner constructs an `Expr` node
+instead of folding an `int`.
+
+    enumber -> Parser[Expr] =
+        lex("[0-9]+".r) ^^ ((s: string) -> Num(unwrap(parse_int(s))))
+
+    eexpr -> Parser[Expr] =
+        chainl1(eterm,
+            ("+" ^^^ ((a: Expr, b: Expr) -> Add(a, b))) |
+                ("-" ^^^ ((a: Expr, b: Expr) -> Sub(a, b))))
+
+    eterm -> Parser[Expr] =
+        chainl1(efactor,
+            ("*" ^^^ ((a: Expr, b: Expr) -> Mul(a, b))) |
+                ("/" ^^^ ((a: Expr, b: Expr) -> Div(a, b))))
+
+A function call is `name "(" args ")"` where args is a comma-separated
+list of expressions (zero or more — `f()` is valid). `repsep` produces
+the `[]Expr` directly.
+
+    eapp -> Parser[Expr] =
+        (ident ~ ("(" ~> repsep(eexpr, lex(literal(","))) <~ ")")) ^^
+            ((p: (string, []Expr)) -> App(p._0, p._1))
+
+    efactor -> Parser[Expr] =
+        eapp | enumber | ("(" ~> eexpr <~ ")") | (("-" ~> efactor) ^^ ((e: Expr) -> Neg(e)))
+
+
+Tests
+-----
+
+    #test
+    test_expr_atom() -> unit
+        parse_all[int](expr(), "42") match
+            Success(v, _) -> expect(v, 42, "single number")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_add_sub_left_assoc() -> unit
+        // 10 - 3 - 2 should be (10 - 3) - 2 = 5, not 10 - (3 - 2) = 9
+        parse_all[int](expr(), "10 - 3 - 2") match
+            Success(v, _) -> expect(v, 5, "left-assoc subtraction")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_precedence() -> unit
+        parse_all[int](expr(), "2 + 3 * 4") match
+            Success(v, _) -> expect(v, 14, "* before +")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_parens() -> unit
+        parse_all[int](expr(), "(2 + 3) * 4") match
+            Success(v, _) -> expect(v, 20, "parens override precedence")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_nested_parens() -> unit
+        parse_all[int](expr(), "((1 + 2) * (3 + 4))") match
+            Success(v, _) -> expect(v, 21, "nested parens compute")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_div_left_assoc() -> unit
+        // 100 / 10 / 2 = 10 / 2 = 5, vs 100 / (10 / 2) = 100 / 5 = 20
+        parse_all[int](expr(), "100 / 10 / 2") match
+            Success(v, _) -> expect(v, 5, "left-assoc division")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_whitespace_robust() -> unit
+        parse_all[int](expr(), "  1+2 *  3  ") match
+            Success(v, _) -> expect(v, 7, "tolerates arbitrary whitespace")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_rejects_garbage() -> unit
+        parse_all[int](expr(), "1 + abc") match
+            Success(_, _) -> panic("should reject 'abc' as a factor")
+            Failure(_, _) -> ()
+
+    #test
+    test_expr_unary_neg() -> unit
+        parse_all[int](expr(), "-5") match
+            Success(v, _) -> expect(v, -5, "unary minus on number")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_unary_neg_in_add() -> unit
+        // -2 + 3: unary minus binds tighter than the additive level
+        parse_all[int](expr(), "-2 + 3") match
+            Success(v, _) -> expect(v, 1, "-2 + 3 = 1")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_binary_minus_then_unary() -> unit
+        // 2--3: binary `-` followed by unary `-` on 3 (no spaces)
+        parse_all[int](expr(), "2--3") match
+            Success(v, _) -> expect(v, 5, "2--3 = 5")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_unary_neg_paren() -> unit
+        parse_all[int](expr(), "-(2 + 3)") match
+            Success(v, _) -> expect(v, -5, "-(2 + 3) = -5")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_expr_double_neg() -> unit
+        parse_all[int](expr(), "--5") match
+            Success(v, _) -> expect(v, 5, "--5 = 5")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_atom() -> unit
+        parse_all[Expr](eexpr(), "42") match
+            Success(t, _) -> expect(eval(t), 42, "atom AST evaluates")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_precedence() -> unit
+        parse_all[Expr](eexpr(), "2 + 3 * 4") match
+            Success(t, _) ->
+                // Tree should be Add(Num(2), Mul(Num(3), Num(4)))
+                expect(eval(t), 14, "eval of (2 + 3*4) AST")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_nested_parens() -> unit
+        parse_all[Expr](eexpr(), "((1 + 2) * (3 + 4))") match
+            Success(t, _) -> expect(eval(t), 21, "eval of nested-paren AST")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_unary_neg() -> unit
+        parse_all[Expr](eexpr(), "-(2 + 3)") match
+            Success(t, _) -> expect(eval(t), -5, "eval of -(2+3) AST")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_tree_shape() -> unit
+        // Confirm the parser actually builds the right tree shape, not just
+        // an equivalent value.
+        parse_all[Expr](eexpr(), "1 - 2") match
+            Success(t, _) ->
+                t match
+                    Sub(l, r) ->
+                        expect(eval(l), 1, "left side evaluates to 1")
+                        expect(eval(r), 2, "right side evaluates to 2")
+                    _ -> panic("expected Sub at the top of the tree")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+Tree-shape coverage for the inline-eval grammar. These pin down the
+exact tree the parser builds, not just the eval value — catches
+miscompiles where commutativity/associativity would mask a bad shape.
+
+    #test
+    test_eexpr_left_assoc_shape() -> unit
+        // Subtraction must be left-associative: 1 - 2 - 3 = (1 - 2) - 3
+        parse_all[Expr](eexpr(), "1 - 2 - 3") match
+            Success(t, _) ->
+                t match
+                    Sub(Sub(Num(a), Num(b)), Num(c)) ->
+                        expect(a, 1, "outer-left = 1")
+                        expect(b, 2, "outer-right = 2")
+                        expect(c, 3, "outermost-right = 3")
+                    _ -> panic("expected Sub(Sub(Num, Num), Num)")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_precedence_shape() -> unit
+        // 1 + 2 * 3 = 1 + (2 * 3); * binds tighter than +
+        parse_all[Expr](eexpr(), "1 + 2 * 3") match
+            Success(t, _) ->
+                t match
+                    Add(Num(a), Mul(Num(b), Num(c))) ->
+                        expect(a, 1, "additive-left = 1")
+                        expect(b, 2, "mul-left = 2")
+                        expect(c, 3, "mul-right = 3")
+                    _ -> panic("expected Add(Num, Mul(Num, Num))")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_deep_nesting_shape() -> unit
+        // ((1+2)*(3+4)) — full 4-level tree shape
+        parse_all[Expr](eexpr(), "((1+2)*(3+4))") match
+            Success(t, _) ->
+                t match
+                    Mul(Add(Num(a), Num(b)), Add(Num(c), Num(d))) ->
+                        expect(a, 1, "first-add-left")
+                        expect(b, 2, "first-add-right")
+                        expect(c, 3, "second-add-left")
+                        expect(d, 4, "second-add-right")
+                    _ -> panic("expected Mul(Add, Add) of Nums")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eexpr_neg_shape() -> unit
+        // -(2 + 3) — Neg wraps the inner Add
+        parse_all[Expr](eexpr(), "-(2 + 3)") match
+            Success(t, _) ->
+                t match
+                    Neg(Add(Num(a), Num(b))) ->
+                        expect(a, 2, "neg-add-left")
+                        expect(b, 3, "neg-add-right")
+                    _ -> panic("expected Neg(Add(Num, Num))")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+Function-call AST: `f(a, b, c)` builds `App(name, []Expr)`. These tests
+exercise the recursive-enum-slice-field path (`App.args: []Expr`) and
+validate both shape and eval-time behaviour.
+
+    #test
+    test_eapp_zero_args() -> unit
+        parse_all[Expr](eexpr(), "f()") match
+            Success(t, _) ->
+                t match
+                    App(name, args) ->
+                        if name != "f" then panic("expected name 'f'")
+                        expect(len(args), 0, "expected zero args")
+                    _ -> panic("expected App")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eapp_one_arg() -> unit
+        parse_all[Expr](eexpr(), "g(5)") match
+            Success(t, _) ->
+                t match
+                    App(name, args) ->
+                        if name != "g" then panic("expected name 'g'")
+                        expect(len(args), 1, "expected one arg")
+                        args[0] match
+                            Num(v) -> expect(v, 5, "arg is Num(5)")
+                            _ -> panic("expected Num arg")
+                    _ -> panic("expected App")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eapp_multi_args() -> unit
+        parse_all[Expr](eexpr(), "h(1, 2, 3)") match
+            Success(t, _) ->
+                t match
+                    App(name, args) ->
+                        if name != "h" then panic("expected name 'h'")
+                        expect(len(args), 3, "expected three args")
+                        expect(eval(args[0]), 1, "arg0 evals to 1")
+                        expect(eval(args[1]), 2, "arg1 evals to 2")
+                        expect(eval(args[2]), 3, "arg2 evals to 3")
+                    _ -> panic("expected App")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eapp_nested() -> unit
+        // outer(inner(1), 2) — App as an arg to App
+        parse_all[Expr](eexpr(), "outer(inner(1), 2)") match
+            Success(t, _) ->
+                t match
+                    App(outer_name, outer_args) ->
+                        if outer_name != "outer" then panic("outer name wrong")
+                        expect(len(outer_args), 2, "outer has 2 args")
+                        outer_args[0] match
+                            App(inner_name, inner_args) ->
+                                if inner_name != "inner" then panic("inner name")
+                                expect(len(inner_args), 1, "inner has 1 arg")
+                                expect(eval(inner_args[0]), 1, "inner arg = 1")
+                            _ -> panic("expected nested App")
+                        expect(eval(outer_args[1]), 2, "second outer arg = 2")
+                    _ -> panic("expected App")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eapp_in_expression() -> unit
+        // 1 + max(2, 3) — App appears as a factor inside an additive expression
+        parse_all[Expr](eexpr(), "1 + max(2, 3)") match
+            Success(t, _) ->
+                t match
+                    Add(Num(a), App(name, args)) ->
+                        expect(a, 1, "left = 1")
+                        if name != "max" then panic("expected 'max'")
+                        expect(len(args), 2, "max takes 2 args")
+                    _ -> panic("expected Add(Num, App)")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eval_max() -> unit
+        parse_all[Expr](eexpr(), "max(2, 3)") match
+            Success(t, _) -> expect(eval(t), 3, "max(2,3) = 3")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eval_min() -> unit
+        parse_all[Expr](eexpr(), "min(7, 4)") match
+            Success(t, _) -> expect(eval(t), 4, "min(7,4) = 4")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eval_abs() -> unit
+        parse_all[Expr](eexpr(), "abs(-5)") match
+            Success(t, _) -> expect(eval(t), 5, "abs(-5) = 5")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eval_mixed_arith_and_app() -> unit
+        // max(1+2, 2*3) — args themselves are arithmetic expressions
+        parse_all[Expr](eexpr(), "max(1+2, 2*3)") match
+            Success(t, _) -> expect(eval(t), 6, "max(3, 6) = 6")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_eval_app_in_expression() -> unit
+        // 1 + max(2, 3) * abs(-4) = 1 + 3*4 = 13
+        parse_all[Expr](eexpr(), "1 + max(2, 3) * abs(-4)") match
+            Success(t, _) -> expect(eval(t), 13, "1 + 3*4 = 13")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
