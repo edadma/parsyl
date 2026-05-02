@@ -1,22 +1,13 @@
-*.class
 *.log
 
-# sbt specific
-.cache/
-.history/
-.lib/
-dist/*
-target/
-lib_managed/
-src_managed/
-project/boot/
-project/plugins/project/
-
-# Scala-IDE specific
-.scala_dependencies
-.worksheet
-
-*~
-.directory
+# IDE / editor noise
 .idea/
 .bsp/
+*~
+.directory
+
+# Build artifacts (sysl backends)
+target/
+*.tof
+*.ll
+*.o
