@@ -13,6 +13,7 @@ so grammars read like the canonical Scala parser-combinator idiom.
     import std.utf8.{decode_rune}
     import std.builder.{new_builder}
     import std.regex.*
+    import std.debug.{assert}
 
 
 Input
@@ -497,7 +498,7 @@ whitespace, then match" form.
 
     regex(pattern: string) -> Parser[string] =
         val (root, nodes, classes, n_groups, err, msg, _) = parse_regex(pattern)
-        if err then panic(s"invalid regex /${pattern}/: ${msg}")
+        assert(!err, s"invalid regex /${pattern}/: ${msg}")
         val insts = compile(root, nodes, n_groups)
         Parser[string]((inp: Input) ->
             val rest = string(inp.source[inp.offset : len(inp.source)])
