@@ -515,6 +515,102 @@ input to be exhausted (modulo trailing whitespace).
         skip_ws(p <~ skip_ws(eoi))(mk_input(src))
 
 
+Common atoms and combinators
+----------------------------
+
+`chars_to_str(cs)` builds a string from a char slice via `StrBuilder`.
+Useful when a parser accumulates `[]char` and the caller wants a
+`string`.
+
+    chars_to_str(cs: []char) -> string =
+        val b = new_builder()
+        for i in 0..<len(cs) do
+            b.write_rune(cs[i])
+        b.to_str()
+
+`int_p` parses an optional minus sign followed by one or more decimal
+digits, with surrounding whitespace handled by `lex`. Returns the
+signed `int` value.
+
+    int_p -> Parser[int] =
+        lex(opt(literal("-")) ~ rep1(digit) ^^ ((p: (Option[string], []char)) ->
+            val n = digits_to_int(p._1)
+            p._0 match
+                Some(_) -> -n
+                None -> n))
+
+`hex_digit` matches a single hex digit (0-9, a-f, A-F) and returns
+the corresponding 0..15 value.
+
+    hex_digit -> Parser[int] =
+        accept_if("hex digit", (c: char) ->
+            ('0' <= c <= '9') || ('a' <= c <= 'f') || ('A' <= c <= 'F')) ^^
+            ((c: char) ->
+                if '0' <= c <= '9' then int(c) - int('0')
+                else if 'a' <= c <= 'f' then int(c) - int('a') + 10
+                else int(c) - int('A') + 10)
+
+`label(p, name)` rewrites the failure message of `p` to read like
+"expected NAME". Useful for surfacing meaningful diagnostics from
+deep within a grammar.
+
+    label[A](p: Parser[A], name: string) -> Parser[A] =
+        Parser[A]((inp: Input) ->
+            p(inp) match
+                Success(v, n) -> Success(v, n)
+                Failure(_, n) -> Failure(s"expected ${name}", n))
+
+`skip(p)` runs `p` for its side effect (cursor advance) and discards
+the value.
+
+    skip[A](p: Parser[A]) -> Parser[unit] =
+        p ^^ ((_: A) -> ())
+
+
+Position info and error formatting
+----------------------------------
+
+`pos_of(inp)` returns a `(line, col)` pair (both 1-indexed) for the
+current cursor position. Walks the source from offset 0 counting
+newlines.
+
+    pos_of(inp: Input) -> (int, int) =
+        var line = 1
+        var col = 1
+        var i = 0
+        while i < inp.offset do
+            if inp.source[i] == 0x0Au8 then
+                line = line + 1
+                col = 1
+            else
+                col = col + 1
+            i = i + 1
+        (line, col)
+
+`format_failure(msg, at)` renders a failure into a multi-line
+diagnostic with line number, column, the source line, and a caret
+under the offending position. Suitable for direct printing to stderr.
+
+    format_failure(msg: string, at: Input) -> string =
+        val (line, col) = pos_of(at)
+        var line_start = at.offset
+        while line_start > 0 && at.source[line_start - 1] != 0x0Au8 do
+            line_start = line_start - 1
+        var line_end = at.offset
+        while line_end < len(at.source) && at.source[line_end] != 0x0Au8 do
+            line_end = line_end + 1
+        val src_line = string(at.source[line_start : line_end])
+        val b = new_builder()
+        b.write(s"line ${line}, col ${col}: ${msg}")
+        b.write_byte(0x0Au8)
+        b.write(src_line)
+        b.write_byte(0x0Au8)
+        for i in 0..<col - 1 do
+            b.write_byte(0x20u8)
+        b.write_byte(0x5Eu8)              // '^'
+        b.to_str()
+
+
 Expression-grammar demo
 -----------------------
 
@@ -1352,3 +1448,124 @@ and validate both shape and eval-time behaviour.
         parse_all[Expr](eexpr(), "1 + max(2, 3) * abs(-4)") match
             Success(t, _) -> expect(eval(t), 13, "1 + 3*4 = 13")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+Common-atoms tests
+------------------
+
+    #test
+    test_chars_to_str() -> unit
+        if chars_to_str(['h', 'i', '!']) != "hi!" then panic("chars_to_str failed")
+
+    #test
+    test_int_p_unsigned() -> unit
+        parse_all[int](int_p(), "42") match
+            Success(v, _) -> expect(v, 42, "int_p 42")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_int_p_signed() -> unit
+        parse_all[int](int_p(), "-17") match
+            Success(v, _) -> expect(v, -17, "int_p -17")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_int_p_with_ws() -> unit
+        parse_all[int](int_p(), "   123   ") match
+            Success(v, _) -> expect(v, 123, "int_p strips ws")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_int_p_rejects_garbage() -> unit
+        parse_all[int](int_p(), "abc") match
+            Success(_, _) -> panic("int_p should reject 'abc'")
+            Failure(_, _) -> ()
+
+    #test
+    test_hex_digit_lowercase() -> unit
+        val p = hex_digit()
+        p(Input(as_bytes("a"), 0)) match
+            Success(v, _) -> expect(v, 10, "hex_digit 'a' = 10")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_hex_digit_uppercase() -> unit
+        val p = hex_digit()
+        p(Input(as_bytes("F"), 0)) match
+            Success(v, _) -> expect(v, 15, "hex_digit 'F' = 15")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_hex_digit_decimal() -> unit
+        val p = hex_digit()
+        p(Input(as_bytes("7"), 0)) match
+            Success(v, _) -> expect(v, 7, "hex_digit '7' = 7")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_hex_digit_rejects_g() -> unit
+        val p = hex_digit()
+        p(Input(as_bytes("g"), 0)) match
+            Success(_, _) -> panic("hex_digit should reject 'g'")
+            Failure(_, _) -> ()
+
+    #test
+    test_label_replaces_msg() -> unit
+        val p = label(literal("foo"), "the foo keyword")
+        p(Input(as_bytes("bar"), 0)) match
+            Success(_, _) -> panic("should fail on 'bar'")
+            Failure(m, _) ->
+                if m != "expected the foo keyword" then
+                    panic(s"unexpected msg: ${m}")
+
+    #test
+    test_label_passes_through_success() -> unit
+        val p = label(literal("foo"), "the foo keyword")
+        p(Input(as_bytes("foo"), 0)) match
+            Success(v, _) -> if v != "foo" then panic("expected 'foo'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_skip_discards() -> unit
+        val p = skip(literal("hello"))
+        p(Input(as_bytes("hello!"), 0)) match
+            Success(_, n) -> expect(n.offset, 5, "skip advanced past 'hello'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_pos_of_first_line() -> unit
+        val inp = Input(as_bytes("hello"), 3)
+        val (line, col) = pos_of(inp)
+        expect(line, 1, "first line")
+        expect(col, 4, "col 4 (1-indexed, after 'hel')")
+
+    #test
+    test_pos_of_after_newline() -> unit
+        // "ab\ncd\nef" — offset 6 lands on 'e' on line 3
+        val inp = Input(as_bytes("ab\ncd\nef"), 6)
+        val (line, col) = pos_of(inp)
+        expect(line, 3, "third line after two newlines")
+        expect(col, 1, "col 1 at start of line")
+
+    #test
+    test_pos_of_at_start() -> unit
+        val inp = Input(as_bytes("anything"), 0)
+        val (line, col) = pos_of(inp)
+        expect(line, 1, "line 1 at start")
+        expect(col, 1, "col 1 at start")
+
+    #test
+    test_format_failure_single_line() -> unit
+        val at = Input(as_bytes("xyz abc"), 4)
+        val out = format_failure("expected number", at)
+        // "line 1, col 5: expected number\nxyz abc\n    ^"
+        if out != "line 1, col 5: expected number\nxyz abc\n    ^" then
+            panic(s"unexpected format: ${out}")
+
+    #test
+    test_format_failure_multi_line() -> unit
+        // Source has two lines; failure on the second.
+        val at = Input(as_bytes("first\nsecond"), 9)
+        val out = format_failure("oops", at)
+        // line 2, col 4 → cursor at 'o' of "second"
+        if out != "line 2, col 4: oops\nsecond\n   ^" then
+            panic(s"unexpected format: ${out}")
