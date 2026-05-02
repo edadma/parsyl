@@ -509,6 +509,16 @@ whitespace, then match" form.
             else
                 Failure(s"expected match for /${pattern}/", inp))
 
+`r(pattern)` is the short-name alias — the parsyl analog to Scala's
+`"...".r`. Sysl doesn't have implicit conversions, so bare strings can't
+also lift to a regex (they already lift to `lex(literal(s))`). But the
+result of `r(...)` is already a `Parser[string]`, so it composes with
+`~`/`|`/`~>`/`<~`/`^^` exactly as a Scala `Regex` would after its
+implicit lift to `Parser[String]`. Typical use looks like
+`r("[A-Za-z]+") ~ "=" ~ r("[0-9]+")`.
+
+    r(pattern: string) -> Parser[string] = regex(pattern)
+
 
 skip_ws / lex
 -------------
@@ -1682,4 +1692,14 @@ Regex tests
             ((t: ((string, string), string)) -> s"${t._0._0}=${t._1}")
         parse_all[string](p, "  foo  =  bar  ") match
             Success(v, _) -> if v != "foo=bar" then panic(s"got '${v}'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_r_alias() -> unit
+        // `r("pat")` is the short alias — composes via the existing
+        // Parser[string] operator overloads exactly like `regex(pat)`.
+        val p = lex(r("[a-z]+")) ~ "=" ~ lex(r("[0-9]+")) ^^
+            ((t: ((string, string), string)) -> s"${t._0._0}=${t._1}")
+        parse_all[string](p, "x = 42") match
+            Success(v, _) -> if v != "x=42" then panic(s"got '${v}'")
             Failure(m, _) -> panic(s"unexpected failure: ${m}")
