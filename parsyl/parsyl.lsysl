@@ -578,16 +578,13 @@ Useful when a parser accumulates `[]char` and the caller wants a
             b.write_rune(cs[i])
         b.to_str()
 
-`int_p` parses an optional minus sign followed by one or more decimal
-digits, with surrounding whitespace handled by `lex`. Returns the
-signed `int` value.
+`int_p` parses an optional sign followed by one or more decimal digits,
+with surrounding whitespace handled by `lex`. The regex matches
+`std.strconv.parse_int`'s grammar exactly, so the conversion is just a
+fold over a known-valid string.
 
     int_p -> Parser[int] =
-        lex(opt(literal("-")) ~ rep1(digit) ^^ ((p: (Option[string], []char)) ->
-            val n = digits_to_int(p._1)
-            p._0 match
-                Some(_) -> -n
-                None -> n))
+        lex("-?[0-9]+".r) ^^ ((s: string) -> unwrap(parse_int(s)))
 
 `hex_digit` matches a single hex digit (0-9, a-f, A-F) and returns
 the corresponding 0..15 value.
@@ -670,6 +667,12 @@ sub-expressions, and arbitrary whitespace between tokens. The whole
 grammar is six function bodies — every interesting line uses one of the
 operators (`~>`, `<~`, `|`, `^^`, `^^^`) or `chainl1`.
 
+`digit`, `letter`, and `alphanum` are conventional char-level combinators
+that every parser library ships under these names. The two demos here
+use the regex extension instead, but these stay as building blocks for
+users who want to compose their own char-level parsers. Each has a
+direct unit test below.
+
     digit -> Parser[char] =
         accept_if("digit", (c: char) -> '0' <= c <= '9')
 
@@ -678,12 +681,6 @@ operators (`~>`, `<~`, `|`, `^^`, `^^^`) or `chainl1`.
 
     alphanum -> Parser[char] =
         letter | digit
-
-    digits_to_int(cs: []char) -> int =
-        var n = 0
-        for i in 0..<len(cs) do
-            n = n * 10 + int(cs[i] - '0')
-        n
 
 `number` and `ident` are written with the regex extension on string —
 the regex engine handles the whole token in one step, and the result
@@ -1496,6 +1493,56 @@ and validate both shape and eval-time behaviour.
 
 Common-atoms tests
 ------------------
+
+    #test
+    test_digit_accepts() -> unit
+        digit()(Input(as_bytes("3"), 0)) match
+            Success(c, n) ->
+                if c != '3' then panic(s"expected '3', got '${c}'")
+                expect(n.offset, 1, "digit advances by 1")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_digit_rejects() -> unit
+        digit()(Input(as_bytes("x"), 0)) match
+            Success(_, _) -> panic("digit should reject 'x'")
+            Failure(_, n) -> expect(n.offset, 0, "digit does not advance on failure")
+
+    #test
+    test_letter_accepts_lowercase() -> unit
+        letter()(Input(as_bytes("k"), 0)) match
+            Success(c, _) -> if c != 'k' then panic(s"got '${c}'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_letter_accepts_uppercase() -> unit
+        letter()(Input(as_bytes("Q"), 0)) match
+            Success(c, _) -> if c != 'Q' then panic(s"got '${c}'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_letter_rejects_digit() -> unit
+        letter()(Input(as_bytes("4"), 0)) match
+            Success(_, _) -> panic("letter should reject digit")
+            Failure(_, _) -> ()
+
+    #test
+    test_alphanum_accepts_letter() -> unit
+        alphanum()(Input(as_bytes("w"), 0)) match
+            Success(c, _) -> if c != 'w' then panic(s"got '${c}'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_alphanum_accepts_digit() -> unit
+        alphanum()(Input(as_bytes("0"), 0)) match
+            Success(c, _) -> if c != '0' then panic(s"got '${c}'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_alphanum_rejects_punct() -> unit
+        alphanum()(Input(as_bytes("!"), 0)) match
+            Success(_, _) -> panic("alphanum should reject '!'")
+            Failure(_, _) -> ()
 
     #test
     test_chars_to_str() -> unit
