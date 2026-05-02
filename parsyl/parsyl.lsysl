@@ -14,6 +14,8 @@ so grammars read like the canonical Scala parser-combinator idiom.
     import std.builder.{new_builder}
     import std.regex.*
     import std.debug.{assert}
+    import std.strconv.{parse_int}
+    import std.result.{unwrap}
 
 
 Input
@@ -683,21 +685,16 @@ operators (`~>`, `<~`, `|`, `^^`, `^^^`) or `chainl1`.
             n = n * 10 + int(cs[i] - '0')
         n
 
-    number -> Parser[int] =
-        lex(rep1(digit) ^^ ((cs: []char) -> digits_to_int(cs)))
+`number` and `ident` are written with the regex extension on string —
+the regex engine handles the whole token in one step, and the result
+is already a `string` (no `[]char`/`StrBuilder` accumulation). Both
+collapse to a single line of grammar.
 
-An identifier is a letter followed by zero-or-more alphanumeric chars,
-encoded as a `string` via `StrBuilder`. Storing the name as a string
-lets evaluators compare it with `name == "max"` instead of going
-through a per-char helper.
+    number -> Parser[int] =
+        lex("[0-9]+".r) ^^ ((s: string) -> unwrap(parse_int(s)))
 
     ident -> Parser[string] =
-        lex(letter ~ rep(alphanum) ^^ ((p: (char, []char)) ->
-            val b = new_builder()
-            b.write_rune(p._0)
-            for i in 0..<len(p._1) do
-                b.write_rune(p._1[i])
-            b.to_str()))
+        lex("[A-Za-z][A-Za-z0-9]*".r)
 
 The op parsers each consume their token (with surrounding whitespace via
 `lex`) and return a binary `(int, int) -> int` combiner — exactly the
@@ -772,7 +769,7 @@ The parser. Same shape as before, but each combiner constructs an
 `Expr` node instead of folding an `int`.
 
     enumber -> Parser[Expr] =
-        lex(rep1(digit) ^^ ((cs: []char) -> Num(digits_to_int(cs))))
+        lex("[0-9]+".r) ^^ ((s: string) -> Num(unwrap(parse_int(s))))
 
     eexpr -> Parser[Expr] =
         chainl1(eterm,
