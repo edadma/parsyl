@@ -521,7 +521,7 @@ postfix-`.r` on `StringOps`. The extension is brought into scope by
 `import parsyl.*` (or any selective import that pulls in this function).
 
     extension (s: string)
-        def r -> Parser[string] = regex(s)
+        r -> Parser[string] = regex(s)
 
 
 skip_ws / lex
