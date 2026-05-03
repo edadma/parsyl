@@ -17,6 +17,8 @@ Surface in this file:
 
     module parsyl
 
+    import std.bytes.{as_bytes}
+
 
 label
 -----
@@ -134,3 +136,163 @@ the closing delimiter.
                                 fail_at = at
             if failed then Failure(fail_msg, fail_at)
             else Success(result, current))
+Combinator tests
+----------------
+
+    #test
+    test_between_strips_delimiters() -> unit
+        val p = between(literal("("), literal(")"), literal("x"))
+        p(Input(as_bytes("(x)"), 0)) match
+            Success(v, n) ->
+                if v != "x" then panic(s"expected 'x', got '${v}'")
+                expect(n.offset, 3, "between consumed all 3 bytes")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_between_fails_on_missing_close() -> unit
+        val p = between(literal("("), literal(")"), literal("x"))
+        p(Input(as_bytes("(x"), 0)) match
+            Success(_, _) -> panic("should have failed on missing ')'")
+            Failure(_, _) -> ()
+
+    #test
+    test_chr_matches() -> unit
+        val p = chr('q')
+        p(Input(as_bytes("q"), 0)) match
+            Success(c, n) ->
+                if c != 'q' then panic(s"got '${c}'")
+                expect(n.offset, 1, "chr advances by 1")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_chr_rejects_other() -> unit
+        val p = chr('q')
+        p(Input(as_bytes("Q"), 0)) match
+            Success(_, _) -> panic("chr 'q' should reject 'Q' (case-sensitive)")
+            Failure(_, _) -> ()
+
+    #test
+    test_one_of_matches() -> unit
+        val p = one_of("aeiou")
+        p(Input(as_bytes("e"), 0)) match
+            Success(c, _) -> if c != 'e' then panic(s"got '${c}'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_one_of_rejects() -> unit
+        val p = one_of("aeiou")
+        p(Input(as_bytes("z"), 0)) match
+            Success(_, _) -> panic("one_of vowels should reject 'z'")
+            Failure(_, _) -> ()
+
+    #test
+    test_none_of_matches_outside_set() -> unit
+        val p = none_of("aeiou")
+        p(Input(as_bytes("z"), 0)) match
+            Success(c, _) -> if c != 'z' then panic(s"got '${c}'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_none_of_rejects_inside_set() -> unit
+        val p = none_of("aeiou")
+        p(Input(as_bytes("e"), 0)) match
+            Success(_, _) -> panic("none_of vowels should reject 'e'")
+            Failure(_, _) -> ()
+
+    #test
+    test_choice_picks_first_match() -> unit
+        val p = choice[string]([literal("foo"), literal("bar"), literal("baz")])
+        p(Input(as_bytes("baz"), 0)) match
+            Success(v, _) -> if v != "baz" then panic(s"got '${v}'")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_choice_fails_when_none_match() -> unit
+        val p = choice[string]([literal("a"), literal("b"), literal("c")])
+        p(Input(as_bytes("z"), 0)) match
+            Success(_, _) -> panic("choice should fail on 'z'")
+            Failure(_, _) -> ()
+
+    #test
+    test_choice_empty_always_fails() -> unit
+        val empty: []Parser[string] = []
+        val p = choice[string](empty)
+        p(Input(as_bytes("anything"), 0)) match
+            Success(_, _) -> panic("empty choice should always fail")
+            Failure(_, _) -> ()
+
+    #test
+    test_take_while_consumes_run() -> unit
+        val p = take_while((c: char) -> '0' <= c <= '9')
+        p(Input(as_bytes("123abc"), 0)) match
+            Success(v, n) ->
+                if v != "123" then panic(s"expected '123', got '${v}'")
+                expect(n.offset, 3, "take_while advanced past digits")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_take_while_empty_match_succeeds() -> unit
+        val p = take_while((c: char) -> '0' <= c <= '9')
+        p(Input(as_bytes("abc"), 0)) match
+            Success(v, n) ->
+                if v != "" then panic(s"expected empty, got '${v}'")
+                expect(n.offset, 0, "take_while no advance on empty match")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_count_exact() -> unit
+        val p = count[char](3, digit())
+        p(Input(as_bytes("12345"), 0)) match
+            Success(v, n) ->
+                if len(v) != 3 then panic(s"expected 3 elements, got ${len(v)}")
+                if v[0] != '1' || v[1] != '2' || v[2] != '3' then
+                    panic("wrong digits collected")
+                expect(n.offset, 3, "count advances exactly 3")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_count_fails_short() -> unit
+        val p = count[char](4, digit())
+        p(Input(as_bytes("12x"), 0)) match
+            Success(_, _) -> panic("count(4, digit) should fail on '12x'")
+            Failure(_, _) -> ()
+
+    #test
+    test_count_zero_succeeds_empty() -> unit
+        val p = count[char](0, digit())
+        p(Input(as_bytes("abc"), 0)) match
+            Success(v, n) ->
+                if len(v) != 0 then panic("count(0) should yield empty")
+                expect(n.offset, 0, "count(0) does not advance")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_many_till_collects_until_end() -> unit
+        // C-style block-comment body: any char until "*/"
+        val any_char = accept_if("any", (_: char) -> true)
+        val p = many_till(any_char, literal("*/"))
+        p(Input(as_bytes("hello*/rest"), 0)) match
+            Success(cs, n) ->
+                if len(cs) != 5 then panic(s"expected 5 chars, got ${len(cs)}")
+                expect(n.offset, 7, "many_till consumes the end delimiter")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_many_till_empty_when_end_matches_first() -> unit
+        val any_char = accept_if("any", (_: char) -> true)
+        val p = many_till(any_char, literal("X"))
+        p(Input(as_bytes("Xrest"), 0)) match
+            Success(cs, n) ->
+                if len(cs) != 0 then panic("many_till should yield empty")
+                expect(n.offset, 1, "many_till consumed only the delimiter")
+            Failure(m, _) -> panic(s"unexpected failure: ${m}")
+
+    #test
+    test_many_till_fails_when_neither_matches() -> unit
+        val any_char = accept_if("any", (c: char) -> c == 'a')
+        val p = many_till(any_char, literal("END"))
+        p(Input(as_bytes("aabZ"), 0)) match
+            Success(_, _) -> panic("many_till should fail when content parser fails before end")
+            Failure(_, _) -> ()
+
+
