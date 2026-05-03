@@ -329,84 +329,14 @@ treated as a hard failure — we'd already committed to the separator.
         rep1sep(p, sep) | success[[]A]([])
 
 
-accept_if
----------
+accept_if / literal / regex
+---------------------------
 
-Read one byte if it satisfies the predicate. `label` is woven into the
-failure message — pass something the user can act on like `"digit"` or
-`"alpha"`.
-
-    accept_if(label: string, pred: (char) -> bool) -> Parser[char] =
-        Parser[char]((inp: Input) ->
-            if inp.at_end() then
-                Failure(s"expected ${label}, got end of input", inp)
-            else
-                val (c, n) = decode_rune(inp.source[inp.offset : len(inp.source)])
-                if pred(c) then Success(c, inp.advance(n))
-                else Failure(s"expected ${label}", inp))
-
-
-literal
--------
-
-Match a literal string prefix. Uses `std.strings.has_prefix` over the
-unconsumed slice — empty string matches at every position.
-
-    literal(s: string) -> Parser[string] =
-        val sb = as_bytes(s)
-        Parser[string]((inp: Input) ->
-            val rest = inp.source[inp.offset : len(inp.source)]
-            if has_prefix(rest, sb) then
-                Success(s, inp.advance(len(sb)))
-            else
-                Failure(s"expected literal '${s}'", inp))
-
-
-regex
------
-
-Match a POSIX regular expression at the current cursor position. The
-pattern is parsed and compiled to bytecode once, at parser construction;
-the returned `Parser[string]` reuses the same bytecode on every call.
-
-Anchoring: the regex must match starting at the current cursor — even if
-the pattern itself is unanchored. We achieve this by running the engine
-on the unconsumed slice and rejecting any match whose start offset is
-nonzero. (POSIX leftmost-longest semantics still apply within the match
-that starts at zero.) Use `^...` / `...$` inside the pattern only to
-constrain start-of-source / end-of-source if you want those.
-
-The Scala parser-combinator analogue is `regex(r: Regex): Parser[String]`
-from `RegexParsers`. Wrap with `lex(...)` for the typical "skip
-whitespace, then match" form.
-
-    regex(pattern: string) -> Parser[string] =
-        val (root, nodes, classes, n_groups, err, msg, _) = parse_regex(pattern)
-        assert(!err, s"invalid regex /${pattern}/: ${msg}")
-        val insts = compile(root, nodes, n_groups)
-        Parser[string]((inp: Input) ->
-            val rest = string(inp.source[inp.offset : len(inp.source)])
-            val m = exec(insts, classes, rest, n_groups)
-            if m.matched() && m.starts[0] == 0 then
-                val n = m.ends[0]
-                Success(string(inp.source[inp.offset : inp.offset + n]), inp.advance(n))
-            else
-                Failure(s"expected match for /${pattern}/", inp))
-
-`r(pattern)` is a short-name free-function alias for `regex(pattern)`,
-useful when the pattern lives in a variable: `r(my_pat) ~ "=" ~ r(my_pat)`.
-
-    r(pattern: string) -> Parser[string] = regex(pattern)
-
-`string.r` is the extension-method form, producing the *exact* Scala
-parser-combinator surface — `"\\d+".r ~ "=" ~ "[a-z]+".r`. Parameterless
-extensions take no parens, so the call site reads identically to Scala's
-postfix-`.r` on `StringOps`. The extension is brought into scope by
-`import parsyl.*` (or any selective import that pulls in this function).
-
-    extension (s: string)
-        r -> Parser[string] = regex(s)
-
+All atomic primitives (`accept_if`, `literal`, `regex` + the `r` alias
+and `string.r` extension, char-level `digit`/`letter`/`alphanum`, the
+char-set parsers `chr`/`one_of`/`none_of`, `take_while`, `chars_to_str`,
+`int_p`, and `hex_digit`) live in `parsyl/atoms.lsysl` under the same
+`module parsyl`.
 
 skip_ws / lex
 -------------
@@ -447,37 +377,8 @@ input to be exhausted (modulo trailing whitespace).
         skip_ws(p <~ skip_ws(eoi))(mk_input(src))
 
 
-Common atoms and combinators
-----------------------------
-
-`chars_to_str(cs)` builds a string from a char slice via `StrBuilder`.
-Useful when a parser accumulates `[]char` and the caller wants a
-`string`.
-
-    chars_to_str(cs: []char) -> string =
-        val b = new_builder()
-        for i in 0..<len(cs) do
-            b.write_rune(cs[i])
-        b.to_str()
-
-`int_p` parses an optional sign followed by one or more decimal digits,
-with surrounding whitespace handled by `lex`. The regex matches
-`std.strconv.parse_int`'s grammar exactly, so the conversion is just a
-fold over a known-valid string.
-
-    int_p -> Parser[int] =
-        lex("-?[0-9]+".r) ^^ ((s: string) -> unwrap(parse_int(s)))
-
-`hex_digit` matches a single hex digit (0-9, a-f, A-F) and returns
-the corresponding 0..15 value.
-
-    hex_digit -> Parser[int] =
-        accept_if("hex digit", (c: char) ->
-            ('0' <= c <= '9') || ('a' <= c <= 'f') || ('A' <= c <= 'F')) ^^
-            ((c: char) ->
-                if '0' <= c <= '9' then int(c) - int('0')
-                else if 'a' <= c <= 'f' then int(c) - int('a') + 10
-                else int(c) - int('A') + 10)
+Combinators
+-----------
 
 `label(p, name)` rewrites the failure message of `p` to read like
 "expected NAME". Useful for surfacing meaningful diagnostics from
@@ -502,38 +403,6 @@ when the delimiters are simple parsers passed positionally.
     between[O, C, A](open: Parser[O], close: Parser[C], p: Parser[A]) -> Parser[A] =
         seq_l(seq_r(open, p), close)
 
-`chr(c)` matches one specific character.
-
-    chr(c: char) -> Parser[char] =
-        accept_if(s"character '${c}'", (x: char) -> x == c)
-
-`one_of(chars)` matches any one character from the given string;
-`none_of(chars)` matches any one character that is *not* in the given
-string. Both decode `chars` as UTF-8, so multibyte runes work too. Both
-fail if the input is at end or the character doesn't fit the set.
-
-    one_of(chars: string) -> Parser[char] =
-        val cs = as_bytes(chars)
-        accept_if(s"one of '${chars}'", (c: char) ->
-            var i = 0
-            var found = false
-            while i < len(cs) && !found do
-                val (r, n) = decode_rune(cs[i : len(cs)])
-                if r == c then found = true
-                i = i + n
-            found)
-
-    none_of(chars: string) -> Parser[char] =
-        val cs = as_bytes(chars)
-        accept_if(s"none of '${chars}'", (c: char) ->
-            var i = 0
-            var ok = true
-            while i < len(cs) && ok do
-                val (r, n) = decode_rune(cs[i : len(cs)])
-                if r == c then ok = false
-                i = i + n
-            ok)
-
 `choice([p1, p2, ...])` is variadic alternation — useful when there are
 many alternatives and the chained `|` form gets noisy. Folds the slice
 through `or` at construction time, so the runtime path is identical to
@@ -548,21 +417,6 @@ hand-written `p1 | p2 | p3`.
                 combined = or(combined, ps[i])
                 i = i + 1
             combined
-
-`take_while(pred)` consumes runes while the predicate holds, returning
-the matched span as a `string`. Always succeeds — the empty string is a
-valid result. Useful for scanning identifier-like or whitespace-like
-runs without the `rep(accept_if(...))` + `chars_to_str` ceremony.
-
-    take_while(pred: (char) -> bool) -> Parser[string] =
-        Parser[string]((inp: Input) ->
-            var i = inp.offset
-            var done = false
-            while i < len(inp.source) && !done do
-                val (c, n) = decode_rune(inp.source[i : len(inp.source)])
-                if !pred(c) then done = true
-                else i = i + n
-            Success(string(inp.source[inp.offset : i]), Input(inp.source, i)))
 
 `count(n, p)` runs `p` exactly `n` times, returning the collected values.
 Fails on the k-th repetition if `p` does. Useful for fixed-width fields,
@@ -665,28 +519,6 @@ under the offending position. Suitable for direct printing to stderr.
         b.to_str()
 
 
-Char-level atoms
-----------------
-
-`digit`, `letter`, and `alphanum` are conventional char-level combinators
-that every parser library ships under these names. They stay as building
-blocks for users composing their own char-level parsers; for full-token
-work the regex extension (`"[0-9]+".r`, `"[A-Za-z]+".r`, etc.) is
-usually a better fit. Each has a direct unit test below.
-
-    digit -> Parser[char] =
-        accept_if("digit", (c: char) -> '0' <= c <= '9')
-
-    letter -> Parser[char] =
-        accept_if("letter", (c: char) -> ('a' <= c <= 'z') || ('A' <= c <= 'Z'))
-
-    alphanum -> Parser[char] =
-        letter | digit
-
-The two expression-grammar demos that exercise the library against a
-real (if toy) target — inline-evaluating `expr` and AST-building `eexpr`
-with function-call syntax — live in `parsyl/demo.lsysl` under the same
-`module parsyl`.
 
 
 Tests
