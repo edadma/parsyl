@@ -478,45 +478,8 @@ closing delimiter.
 Position info and error formatting
 ----------------------------------
 
-`pos_of(inp)` returns a `(line, col)` pair (both 1-indexed) for the
-current cursor position. Walks the source from offset 0 counting
-newlines.
-
-    pos_of(inp: Input) -> (int, int) =
-        var line = 1
-        var col = 1
-        var i = 0
-        while i < inp.offset do
-            if inp.source[i] == 0x0Au8 then
-                line = line + 1
-                col = 1
-            else
-                col = col + 1
-            i = i + 1
-        (line, col)
-
-`format_failure(msg, at)` renders a failure into a multi-line
-diagnostic with line number, column, the source line, and a caret
-under the offending position. Suitable for direct printing to stderr.
-
-    format_failure(msg: string, at: Input) -> string =
-        val (line, col) = pos_of(at)
-        var line_start = at.offset
-        while line_start > 0 && at.source[line_start - 1] != 0x0Au8 do
-            line_start = line_start - 1
-        var line_end = at.offset
-        while line_end < len(at.source) && at.source[line_end] != 0x0Au8 do
-            line_end = line_end + 1
-        val src_line = string(at.source[line_start : line_end])
-        val b = new_builder()
-        b.write(s"line ${line}, col ${col}: ${msg}")
-        b.write_byte(0x0Au8)
-        b.write(src_line)
-        b.write_byte(0x0Au8)
-        for i in 0..<col - 1 do
-            b.write_byte(0x20u8)
-        b.write_byte(0x5Eu8)              // '^'
-        b.to_str()
+`pos_of(inp)` and `format_failure(msg, at)` live in
+`parsyl/errors.lsysl` under the same `module parsyl`.
 
 
 
