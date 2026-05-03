@@ -165,31 +165,8 @@ to user impls for other operand types).
                 Success(v, _) -> Success(v, inp)
                 Failure(m, n) -> Failure(m, n))
 
-    trait Not[A, R]
-        #operator("!")
-        not_op(a: A) -> R
-
-    impl[A] Not[Parser[A], Parser[unit]]
-        not_op(p: Parser[A]) -> Parser[unit] = not_p(p)
-
-    trait Peek[A, R]
-        #operator("&")
-        peek_op(a: A) -> R
-
-    impl[A] Peek[Parser[A], Parser[A]]
-        peek_op(p: Parser[A]) -> Parser[A] = and_p(p)
-
-Bare-string operands lift to `lex(literal(s))` here too, so a
-grammar can write `&"ab"` and `!"c"` directly without spelling
-`literal`. The lifted parser parses the string token (with
-surrounding whitespace), so `!"c"` reads as "must not be the
-literal token 'c' next".
-
-    impl Not[string, Parser[unit]]
-        not_op(s: string) -> Parser[unit] = not_p(lex(literal(s)))
-
-    impl Peek[string, Parser[string]]
-        peek_op(s: string) -> Parser[string] = and_p(lex(literal(s)))
+    // Operator-trait machinery for `!` and `&` lives in `parsyl/operators.lsysl`
+    // (same module). The dispatch is wired to `not_p` and `and_p` above.
 
 
 rep
@@ -270,104 +247,9 @@ binary combiner. `a OP b OP c` becomes `(a OP b) OP c`.
 Operators
 ---------
 
-Combinator-style infix operators via the user-defined-operator and
-multi-param-trait machinery. `~` for sequence, `|` for alternation,
-`~>` and `<~` for sequence-keep-right / sequence-keep-left, `^^` for
-map, `^^^` for replace-with-constant.
-
-    trait Concat[A, B, R]
-        #operator("~")
-        concat(a: A, b: B) -> R
-
-    impl[A, B] Concat[Parser[A], Parser[B], Parser[(A, B)]]
-        concat(a: Parser[A], b: Parser[B]) -> Parser[(A, B)] = seq(a, b)
-
-    trait Or[T]
-        #operator("|")
-        or_op(a: T, b: T) -> T
-
-    impl[A] Or[Parser[A]]
-        or_op(a: Parser[A], b: Parser[A]) -> Parser[A] = or(a, b)
-
-    trait SeqR[A, B, R]
-        #operator("~>")
-        seqr(a: A, b: => B) -> R
-
-    impl[A, B] SeqR[Parser[A], Parser[B], Parser[B]]
-        seqr(a: Parser[A], b: => Parser[B]) -> Parser[B] =
-            Parser[B]((inp: Input) ->
-                a(inp) match
-                    Failure(m, n) -> Failure(m, n)
-                    Success(_, na) -> b(na))
-
-    trait SeqL[A, B, R]
-        #operator("<~")
-        seql(a: A, b: => B) -> R
-
-    impl[A, B] SeqL[Parser[A], Parser[B], Parser[A]]
-        seql(a: Parser[A], b: => Parser[B]) -> Parser[A] =
-            Parser[A]((inp: Input) ->
-                a(inp) match
-                    Failure(m, n) -> Failure(m, n)
-                    Success(va, na) ->
-                        b(na) match
-                            Failure(m, n) -> Failure(m, n)
-                            Success(_, nb) -> Success(va, nb))
-
-    trait Map[A, F, R]
-        #operator("^^")
-        pmap(a: A, f: F) -> R
-
-    impl[A, B] Map[Parser[A], (A) -> B, Parser[B]]
-        pmap(a: Parser[A], f: (A) -> B) -> Parser[B] = map(a, f)
-
-    trait MapTo[A, V, R]
-        #operator("^^^")
-        pmapto(a: A, v: V) -> R
-
-    impl[A, B] MapTo[Parser[A], B, Parser[B]]
-        pmapto(a: Parser[A], v: B) -> Parser[B] = map(a, (_: A) -> v)
-
-    impl[B] MapTo[string, B, Parser[B]]
-        pmapto(s: string, v: B) -> Parser[B] = map(lex(literal(s)), (_: string) -> v)
-
-    impl[B] Map[string, (string) -> B, Parser[B]]
-        pmap(s: string, f: (string) -> B) -> Parser[B] = map(lex(literal(s)), f)
-
-A string literal in operator position lifts itself to `lex(literal(s))`
-— skips surrounding whitespace and matches the token. Lets grammars
-read like the Scala parser-combinator idiom: `"(" ~> expr <~ ")"`.
-
-    impl[B] Concat[string, Parser[B], Parser[(string, B)]]
-        concat(s: string, b: Parser[B]) -> Parser[(string, B)] = seq(lex(literal(s)), b)
-
-    impl[A] Concat[Parser[A], string, Parser[(A, string)]]
-        concat(a: Parser[A], s: string) -> Parser[(A, string)] = seq(a, lex(literal(s)))
-
-    impl[B] SeqR[string, Parser[B], Parser[B]]
-        seqr(s: string, b: => Parser[B]) -> Parser[B] =
-            val sp = lex(literal(s))
-            Parser[B]((inp: Input) ->
-                sp(inp) match
-                    Failure(m, n) -> Failure(m, n)
-                    Success(_, na) -> b(na))
-
-    impl[A] SeqR[Parser[A], string, Parser[string]]
-        seqr(a: Parser[A], s: => string) -> Parser[string] = seq_r(a, lex(literal(s)))
-
-    impl[B] SeqL[string, Parser[B], Parser[string]]
-        seql(s: string, b: => Parser[B]) -> Parser[string] =
-            val sp = lex(literal(s))
-            Parser[string]((inp: Input) ->
-                sp(inp) match
-                    Failure(m, n) -> Failure(m, n)
-                    Success(va, na) ->
-                        b(na) match
-                            Failure(m, n) -> Failure(m, n)
-                            Success(_, nb) -> Success(va, nb))
-
-    impl[A] SeqL[Parser[A], string, Parser[A]]
-        seql(a: Parser[A], s: => string) -> Parser[A] = seq_l(a, lex(literal(s)))
+All operator-trait machinery (`~`, `|`, `~>`, `<~`, `^^`, `^^^`, plus the
+`!` and `&` PEG dispatchers and the bare-string lifts) lives in
+`parsyl/operators.lsysl` under the same `module parsyl`.
 
 
 chainr1
