@@ -1,0 +1,136 @@
+parsyl — higher-order combinators
+==================================
+
+Combinators that take parsers and return new parsers — the "glue" layer
+above the atom primitives in `atoms.lsysl` and the basic combinators in
+`parsyl.lsysl` (`seq`, `or`, `rep`, `chainl1`, etc.). Lives alongside
+the rest of the library under the same `module parsyl`.
+
+Surface in this file:
+
+  - `label(p, name)` — rewrite failure message.
+  - `skip(p)` — discard the value, keep the cursor advance.
+  - `between(open, close, p)` — alias for `open ~> p <~ close`.
+  - `choice([p1, p2, ...])` — variadic alternation.
+  - `count(n, p)` — exactly n repetitions.
+  - `many_till(p, stop)` — repeat until stop matches; consumes stop.
+
+    module parsyl
+
+
+label
+-----
+
+`label(p, name)` rewrites the failure message of `p` to read like
+"expected NAME". Useful for surfacing meaningful diagnostics from
+deep within a grammar.
+
+    label[A](p: Parser[A], name: string) -> Parser[A] =
+        Parser[A]((inp: Input) ->
+            p(inp) match
+                Success(v, n) -> Success(v, n)
+                Failure(_, n) -> Failure(s"expected ${name}", n))
+
+
+skip
+----
+
+`skip(p)` runs `p` for its side effect (cursor advance) and discards
+the value.
+
+    skip[A](p: Parser[A]) -> Parser[unit] =
+        p ^^ ((_: A) -> ())
+
+
+between
+-------
+
+`between(open, close, p)` runs `open` then `p` then `close`, returning
+only `p`'s value. Equivalent to `open ~> p <~ close` but reads linearly
+when the delimiters are simple parsers passed positionally.
+
+    between[O, C, A](open: Parser[O], close: Parser[C], p: Parser[A]) -> Parser[A] =
+        seq_l(seq_r(open, p), close)
+
+
+choice
+------
+
+`choice([p1, p2, ...])` is variadic alternation — useful when there are
+many alternatives and the chained `|` form gets noisy. Folds the slice
+through `or` at construction time, so the runtime path is identical to
+hand-written `p1 | p2 | p3`.
+
+    choice[A](ps: []Parser[A]) -> Parser[A] =
+        if len(ps) == 0 then failure[A]("empty choice")
+        else
+            var combined = ps[0]
+            var i = 1
+            while i < len(ps) do
+                combined = or(combined, ps[i])
+                i = i + 1
+            combined
+
+
+count
+-----
+
+`count(n, p)` runs `p` exactly `n` times, returning the collected
+values. Fails on the k-th repetition if `p` does. Useful for
+fixed-width fields, hex-byte runs, IPv4 octets, etc.
+
+    count[A](n: int, p: Parser[A]) -> Parser[[]A] =
+        Parser[[]A]((inp: Input) ->
+            var result: []A = []
+            var current = inp
+            var i = 0
+            var failed = false
+            var fail_msg = ""
+            var fail_at = inp
+            while i < n && !failed do
+                p(current) match
+                    Success(v, after) ->
+                        result = append(result, v)
+                        current = after
+                    Failure(m, at) ->
+                        failed = true
+                        fail_msg = m
+                        fail_at = at
+                i = i + 1
+            if failed then Failure(fail_msg, fail_at)
+            else Success(result, current))
+
+
+many_till
+---------
+
+`many_till(p, stop)` repeats `p` until `stop` matches, returning the
+values collected. Consumes the matched `stop` (it's a delimiter, not
+part of the content). Classic use case: C-style block-comment bodies —
+`many_till(any_char, "*/")` collects everything up to and including
+the closing delimiter.
+
+    many_till[A, B](p: Parser[A], stop: Parser[B]) -> Parser[[]A] =
+        Parser[[]A]((inp: Input) ->
+            var result: []A = []
+            var current = inp
+            var done = false
+            var failed = false
+            var fail_msg = ""
+            var fail_at = inp
+            while !done && !failed do
+                stop(current) match
+                    Success(_, after) ->
+                        done = true
+                        current = after
+                    Failure(_, _) ->
+                        p(current) match
+                            Success(v, after) ->
+                                result = append(result, v)
+                                current = after
+                            Failure(m, at) ->
+                                failed = true
+                                fail_msg = m
+                                fail_at = at
+            if failed then Failure(fail_msg, fail_at)
+            else Success(result, current))
